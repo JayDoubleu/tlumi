@@ -28,7 +28,7 @@ These are repo/PyPI settings, not code. All of them must exist before the first 
    uv run python -m pytest tests/ -q
    uv run ruff check src/ tests/ examples/ && uv run mypy
    uv build && uvx twine check dist/*
-   tar -tzf dist/*.tar.gz | grep -Ev 'tlumi-|examples/|tests/|src/' # eyeball for anything unexpected
+   tar -tzf dist/*.tar.gz | grep -Ev '^tlumi-[0-9][^/]*/(src/|tests/|examples/|PKG-INFO|pyproject|README|CHANGELOG|CONTRIBUTING|SECURITY|DESIGN|LICENSE|\.gitignore)' # anything printed is unexpected
    ```
 5. **Commit, push, and wait for CI to go green** on `main`.
 6. **Tag and release**: create a GitHub Release with tag `vX.Y.Z` targeting the green commit (the workflow rejects a tag that does not match `pyproject.toml`). Paste the CHANGELOG section as the release notes.

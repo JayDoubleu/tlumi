@@ -457,6 +457,71 @@ def test_output_composite_nested_secret_masked_named_raw(
 @patch("tlumi.commands.output.get_stack")
 @patch("tlumi.commands.output.load_config")
 @patch("tlumi.commands.output.find_project_dir")
+def test_output_raw_composite_dict_is_json(mock_find, mock_config, mock_stack, capsys):
+    """--raw on a dict output emits compact JSON, not Python repr.
+
+    str() on a dict prints single-quoted repr, which is neither JSON nor
+    shell-consumable; the masked composite must round-trip through json.loads.
+    """
+    mock_find.return_value = "/fake"
+    mock_config.return_value = MagicMock()
+    _composite_stack(mock_stack)
+
+    from tlumi.commands.output import run_output
+
+    run_output(name="db", raw=True)
+
+    output = capsys.readouterr().out
+    assert output.endswith("\n")
+    data = json.loads(output)
+    assert data == {"host": "example.com", "password": "(sensitive)"}
+    # Compact separators: single line, no space padding after separators.
+    assert output.strip() == '{"host":"example.com","password":"(sensitive)"}'
+
+
+@patch("tlumi.commands.output.get_stack")
+@patch("tlumi.commands.output.load_config")
+@patch("tlumi.commands.output.find_project_dir")
+def test_output_raw_list_is_json(mock_find, mock_config, mock_stack, capsys):
+    """--raw on a list output emits compact JSON."""
+    mock_find.return_value = "/fake"
+    mock_config.return_value = MagicMock()
+    stack = MagicMock(spec=Stack)
+    stack.export_stack.return_value = _stack_state({"zones": ["a", "b", "c"]})
+    mock_stack.return_value = stack
+
+    from tlumi.commands.output import run_output
+
+    run_output(name="zones", raw=True)
+
+    output = capsys.readouterr().out
+    assert json.loads(output) == ["a", "b", "c"]
+    assert output.strip() == '["a","b","c"]'
+
+
+@patch("tlumi.commands.output.get_stack")
+@patch("tlumi.commands.output.load_config")
+@patch("tlumi.commands.output.find_project_dir")
+def test_output_raw_scalar_stays_unquoted(mock_find, mock_config, mock_stack, capsys):
+    """--raw scalars keep str() rendering: a plain string gains no JSON quotes."""
+    mock_find.return_value = "/fake"
+    mock_config.return_value = MagicMock()
+    stack = MagicMock(spec=Stack)
+    stack.export_stack.return_value = _stack_state({"count": 42, "url": "https://example.com"})
+    mock_stack.return_value = stack
+
+    from tlumi.commands.output import run_output
+
+    run_output(name="count", raw=True)
+    assert capsys.readouterr().out == "42\n"
+
+    run_output(name="url", raw=True)
+    assert capsys.readouterr().out == "https://example.com\n"
+
+
+@patch("tlumi.commands.output.get_stack")
+@patch("tlumi.commands.output.load_config")
+@patch("tlumi.commands.output.find_project_dir")
 def test_output_composite_show_secrets_reveals_nested(mock_find, mock_config, mock_stack, capsys):
     """--show-secrets reveals nested secrets from stack.outputs() plaintext."""
     mock_find.return_value = "/fake"

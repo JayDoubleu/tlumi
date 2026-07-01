@@ -82,7 +82,15 @@ def run_output(
         elif raw:
             # Bypass Rich entirely: when stdout is a pipe/file Rich would
             # hard-wrap at width 80, injecting newlines into the captured value.
-            sys.stdout.write(str(val) + "\n")
+            # Composite values are emitted as compact JSON: str() would print
+            # Python repr (single quotes), which is neither JSON nor
+            # shell-consumable. Scalars stay str() (a plain string must not
+            # gain JSON quotes in shell capture).
+            if isinstance(val, (dict, list)):
+                rendered = json.dumps(val, separators=(",", ":"))
+            else:
+                rendered = str(val)
+            sys.stdout.write(rendered + "\n")
         else:
             console.print(f"  {name} = {val!r}", highlight=False, markup=False)
         return

@@ -7,6 +7,7 @@ and show commands.
 
 from __future__ import annotations
 
+import json
 from typing import Final
 
 _PULUMI_UNKNOWN: Final = "04da6b54-80e4-46f7-96ec-b56ff0331ba9"
@@ -46,4 +47,42 @@ def _sanitize_value(value: object, _depth: int = 0) -> object:
         return {k: _sanitize_value(v, _depth + 1) for k, v in value.items()}
     if isinstance(value, list):
         return [_sanitize_value(v, _depth + 1) for v in value]
+    return value
+
+
+def _unwrap_secrets(value: object, _depth: int = 0) -> object:
+    """Recursively replace secret wrapper dicts with their decoded plaintext.
+
+    Sibling of _sanitize_value() for the human-readable --show-secrets render
+    paths (show, state show): exported state stores each secret as
+    ``{<sig>: <magic>, "plaintext": "<json-encoded value>"}`` and printing
+    that wrapper verbatim makes the flag look broken. Pulumi JSON-encodes the
+    ``plaintext`` field, so it is decoded before display; the decoded value is
+    walked again defensively in case it embeds further wrappers.
+
+    Fallbacks: a wrapper without a ``plaintext`` string (state exported
+    without secrets carries ciphertext only) becomes the sensitive marker
+    rather than dumping base64 ciphertext; an undecodable ``plaintext`` is
+    returned as the raw string (the user asked for the value, and masking it
+    would reproduce the very "flag looks broken" problem).
+
+    This is a display-fidelity helper, not a mask: _sanitize_value() owns the
+    masking guarantees. At _MAX_DEPTH the value is returned unchanged (no
+    transformation past the cap).
+    """
+    if _depth >= _MAX_DEPTH:
+        return value
+    if isinstance(value, dict) and value.get(_PULUMI_SECRET_SIG) == _PULUMI_SECRET_VALUE:
+        plaintext = value.get("plaintext")
+        if not isinstance(plaintext, str):
+            return _SENSITIVE_MARKER
+        try:
+            decoded = json.loads(plaintext)
+        except ValueError:
+            return plaintext
+        return _unwrap_secrets(decoded, _depth + 1)
+    if isinstance(value, dict):
+        return {k: _unwrap_secrets(v, _depth + 1) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_unwrap_secrets(v, _depth + 1) for v in value]
     return value

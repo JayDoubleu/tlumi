@@ -14,8 +14,8 @@ from pulumi.automation import CommandError, Deployment
 from rich.markup import escape
 
 from tlumi._safeio import safe_mkdir
-from tlumi.commands.show import _strip_dunder_keys
 from tlumi.config import DEFAULT_STACK, find_project_dir, load_config
+from tlumi.diffs import _strip_dunder_keys
 from tlumi.display import (
     animated_status,
     confirm,
@@ -174,7 +174,7 @@ def run_state_list(json_output: bool = False) -> None:
 
 def run_state_show(resource: str, json_output: bool = False, show_secrets: bool = False) -> None:
     """Show details of a specific resource."""
-    from tlumi.sanitize import _sanitize_value
+    from tlumi.sanitize import _sanitize_value, _unwrap_secrets
 
     config = load_config(find_project_dir())
 
@@ -206,10 +206,15 @@ def run_state_show(resource: str, json_output: bool = False, show_secrets: bool 
         )
         return
 
-    # Human-readable rendering hides Pulumi bookkeeping keys (top-level
-    # "__*"), matching the plan-diff behavior; the --json envelope above
-    # keeps them (faithful dump). _sanitize_value can collapse a top-level
-    # secret wrapper to a string, so only dict-shaped values are filtered.
+    # Human-readable rendering: with --show-secrets, decode the exported-state
+    # secret wrappers to their plaintext values (the --json envelope above
+    # keeps the raw wrappers, faithful to the state-pull format), then hide
+    # Pulumi bookkeeping keys ("__*", recursively, matching the plan-diff
+    # behavior). _sanitize_value/_unwrap_secrets can collapse a top-level
+    # secret wrapper to a scalar, so only dict-shaped values are filtered.
+    if show_secrets:
+        inputs = _unwrap_secrets(inputs)
+        outputs = _unwrap_secrets(outputs)
     if isinstance(inputs, dict):
         inputs = _strip_dunder_keys(inputs)
     if isinstance(outputs, dict):
@@ -601,17 +606,36 @@ def run_state_push(file_path: str, auto_approve: bool = False, json_output: bool
             f"File not found: {file_path}",
             hint="Use 'tlumi state pull' to export a valid state file.",
         )
+    if path.is_dir():
+        # os.open() succeeds on a directory and the failure would surface from
+        # os.fdopen() as "Is a directory: <fd number>" with no path in sight;
+        # catch the common mistake (pointing at .tlumi/backups instead of a
+        # backup file) up front with a clear message.
+        raise WorkspaceError(
+            f"Not a file: {file_path} is a directory.",
+            hint="Pass the state JSON file itself, "
+            "e.g. .tlumi/backups/state_push_<timestamp>.json.",
+        )
 
     try:
         # O_NOFOLLOW closes the TOCTOU window between the is_symlink() checks
         # above and this read: a leaf swapped for a symlink in between fails
         # the open with ELOOP instead of being followed.
         fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW)
-        with os.fdopen(fd, encoding="utf-8") as f:
+        try:
+            f = os.fdopen(fd, encoding="utf-8")
+        except OSError:
+            # fdopen failure (e.g. the leaf raced into a directory after the
+            # is_dir() check) leaves the raw fd open; close it before the
+            # error propagates. fdopen errors name the fd, not the path, so
+            # the wrapper message below carries file_path.
+            os.close(fd)
+            raise
+        with f:
             raw = f.read()
     except (OSError, UnicodeDecodeError) as e:
         raise WorkspaceError(
-            f"Cannot read file: {e}",
+            f"Cannot read file {file_path}: {e}",
             hint="Check file path, permissions, and encoding (must be UTF-8).",
         ) from e
     try:

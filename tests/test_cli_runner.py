@@ -491,25 +491,39 @@ def test_command_wiring(argv, module_path, func_name, expected):
 # ---------------------------------------------------------------------------
 # Unknown-command suggestions: typer >= 0.20 used to append its own
 # "Did you mean" onto click >= 8.3's, doubling the message on every typo.
+# Exactly one layer must stay on: suggest_commands=False is passed only when
+# click >= 8.3 provides its own native suggestion, otherwise typer's remains.
 # ---------------------------------------------------------------------------
 
 
-def test_unknown_command_suggestion_not_duplicated():
-    """A typo'd command shows at most one 'Did you mean' suggestion.
+def _expected_suggestion_count() -> int:
+    """1 when either click (>= 8.3) or typer (>= 0.20) can suggest, else 0.
+
+    Only the legacy floor combo (typer < 0.20 with click < 8.3) has no
+    suggestion layer at all; every other combination must show exactly one.
+    Asserting == (not <=) makes a total loss of suggestions fail the suite.
+    """
+    from tlumi.cli import _CLICK_HAS_NATIVE_SUGGESTIONS, _TYPER_HAS_SUGGEST_COMMANDS
+
+    return 1 if (_CLICK_HAS_NATIVE_SUGGESTIONS or _TYPER_HAS_SUGGEST_COMMANDS) else 0
+
+
+def test_unknown_command_suggestion_shown_exactly_once():
+    """A typo'd command shows exactly one 'Did you mean' suggestion.
 
     CliRunner's ``result.output`` already merges stderr, so count on it
     alone; adding ``result.stderr`` would double-count a single message.
     """
     result = runner.invoke(app, ["plann"])
     assert result.exit_code == 2
-    assert result.output.count("Did you mean") <= 1
+    assert result.output.count("Did you mean") == _expected_suggestion_count()
 
 
-def test_unknown_subcommand_suggestion_not_duplicated():
-    """A typo'd subcommand (state lst) also shows at most one suggestion."""
+def test_unknown_subcommand_suggestion_shown_exactly_once():
+    """A typo'd subcommand (state lst) also shows exactly one suggestion."""
     result = runner.invoke(app, ["state", "lst"])
     assert result.exit_code == 2
-    assert result.output.count("Did you mean") <= 1
+    assert result.output.count("Did you mean") == _expected_suggestion_count()
 
 
 # ---------------------------------------------------------------------------

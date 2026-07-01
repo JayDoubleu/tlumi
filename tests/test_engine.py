@@ -671,6 +671,28 @@ def test_animated_log_only_animates_marker(monkeypatch):
     assert "creating..." not in text  # marker '...' replaced by the spinner
 
 
+def test_animated_log_renders_emoji_shortcodes_verbatim():
+    """Live-window lines with :name: sequences must not be rewritten to emoji.
+
+    Text.from_markup substitutes shortcodes at construction time regardless
+    of the console's emoji setting, so Console(emoji=False) alone cannot
+    protect the live window; provider data with :word: strings (IPv6 groups
+    like :ab:, MAC bytes) would be corrupted while the resource is in flight.
+    """
+    from rich.console import Console
+    from rich.markup import escape
+
+    from tlumi.engine import _AnimatedLog
+
+    line = f"    [dim]{escape('vm-nic: assigned address 2001:db8::ab:1 :tada:')}[/dim]"
+    console = Console(emoji=False, width=200)
+    with console.capture() as cap:
+        console.print(_AnimatedLog([(line, False)]))
+    text = cap.get()
+    assert "2001:db8::ab:1" in text  # ':ab:' group not swapped for the AB-button emoji
+    assert ":tada:" in text
+
+
 # ---------------------------------------------------------------------------
 # _sanitize_value
 # ---------------------------------------------------------------------------
@@ -1950,3 +1972,77 @@ def test_stack_outputs_changed_ignores_non_stack_resources():
     ev.res_outputs_event.metadata.type = "aws:s3:BucketV2"
     handler.on_preview(ev)
     assert handler.stack_outputs_changed is False
+
+
+# ---------------------------------------------------------------------------
+# Secret-output blind spot: preview scrubs every secret output value to the
+# identical wrapper dict on BOTH the old and new side (the Automation API's
+# preview() cannot request unscrubbed secrets; verified against a live
+# stack), so stack_outputs_changed cannot see a changed secret export value.
+# stack_outputs_contain_secrets flags when the comparison was blind.
+# ---------------------------------------------------------------------------
+
+
+def _scrubbed_secret_wrapper() -> dict:
+    """The wrapper shape preview events carry for secret output values."""
+    return {_PULUMI_SECRET_SIG: _PULUMI_SECRET_VALUE, "ciphertext": "[secret]"}
+
+
+def test_stack_outputs_secret_value_change_is_invisible():
+    """Pins the blind spot: a changed secret export arrives as equal wrappers."""
+    from helpers import stack_outputs_event
+
+    handler = EventHandler(quiet=True)
+    handler.on_preview(
+        stack_outputs_event(
+            {"extra": _scrubbed_secret_wrapper()}, {"extra": _scrubbed_secret_wrapper()}
+        )
+    )
+    assert handler.stack_outputs_changed is False
+    assert handler.stack_outputs_contain_secrets is True
+    assert handler.callback_errors == 0
+
+
+def test_stack_outputs_contain_secrets_false_for_plain_outputs():
+    """Plain equal outputs must not trigger the blind-spot hint."""
+    from helpers import stack_outputs_event
+
+    handler = EventHandler(quiet=True)
+    handler.on_preview(stack_outputs_event({"greeting": "world"}, {"greeting": "world"}))
+    assert handler.stack_outputs_changed is False
+    assert handler.stack_outputs_contain_secrets is False
+
+
+def test_stack_outputs_contain_secrets_nested_wrapper():
+    """A composite output with a nested secret wrapper also flags the blind spot."""
+    from helpers import stack_outputs_event
+
+    outputs = {"db": {"host": "db.example.com", "password": _scrubbed_secret_wrapper()}}
+    handler = EventHandler(quiet=True)
+    handler.on_preview(stack_outputs_event(outputs, outputs))
+    assert handler.stack_outputs_changed is False
+    assert handler.stack_outputs_contain_secrets is True
+
+
+def test_stack_outputs_contain_secrets_wrapper_in_list():
+    from helpers import stack_outputs_event
+
+    outputs = {"keys": ["plain", _scrubbed_secret_wrapper()]}
+    handler = EventHandler(quiet=True)
+    handler.on_preview(stack_outputs_event(outputs, outputs))
+    assert handler.stack_outputs_contain_secrets is True
+
+
+def test_stack_outputs_secret_plus_plain_change_sets_both():
+    """A plain-output change alongside a secret sets both flags."""
+    from helpers import stack_outputs_event
+
+    handler = EventHandler(quiet=True)
+    handler.on_preview(
+        stack_outputs_event(
+            {"extra": _scrubbed_secret_wrapper(), "greeting": "world"},
+            {"extra": _scrubbed_secret_wrapper(), "greeting": "mars"},
+        )
+    )
+    assert handler.stack_outputs_changed is True
+    assert handler.stack_outputs_contain_secrets is True

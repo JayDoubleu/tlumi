@@ -132,34 +132,39 @@ _KNOWN_SECRETS_KEYS = ("allow_unencrypted", "warn_unencrypted")
 
 _YAML_INT_TAG = "tag:yaml.org,2002:int"
 _NON_DECIMAL_INT_TAG = "!tlumi/non-decimal-int"
-# Plain decimal ints only: these are the sole int forms whose text survives a
-# parse-then-stringify round trip. Everything else PyYAML's YAML 1.1 int
-# resolver accepts (leading-zero octal, 0x/0b, underscore separators,
-# sexagesimal) is remapped to _NON_DECIMAL_INT_TAG below.
-_DECIMAL_INT_RE = re.compile(r"^[-+]?(?:0|[1-9][0-9]*)\Z")
+# Round-tripping decimal ints only: these are the sole int forms whose text
+# survives a parse-then-stringify round trip (str(int(x)) == x). Everything
+# else PyYAML's YAML 1.1 int resolver accepts (leading-zero octal, 0x/0b,
+# underscore separators, sexagesimal, plus the decimal-but-lossy '+7' and
+# '-0' forms whose sign stringification drops) is remapped to
+# _NON_DECIMAL_INT_TAG below.
+_DECIMAL_INT_RE = re.compile(r"^(?:0|-?[1-9][0-9]*)\Z")
 
 
 class _NonDecimalIntText(str):
-    """Raw text of a YAML 1.1 non-decimal int form (octal/hex/sexagesimal/...).
+    """Raw text of a YAML 1.1 int form that does not round-trip.
 
     PyYAML silently resolves ``0777`` to 511 and ``1:30`` to 90, the same
     lossy-rewrite class that gets floats rejected in ``_coerce_variable_value``.
-    The strict loader preserves the original text in this marker type so the
-    coercion step can reject it with a hint that quotes the value the user
-    actually wrote. Subclassing ``str`` keeps non-variable config fields
-    (which validate against ``str``) behaving sensibly for these scalars.
+    Despite the name, this also carries the decimal-but-lossy forms ``+7``
+    and ``-0``, whose sign stringification drops (``+7`` would silently
+    become ``7``). The strict loader preserves the original text in this
+    marker type so the coercion step can reject it with a hint that quotes
+    the value the user actually wrote. Subclassing ``str`` keeps non-variable
+    config fields (which validate against ``str``) behaving sensibly for
+    these scalars.
     """
 
     __slots__ = ()
 
 
 class _StrictIntLoader(yaml.SafeLoader):
-    """SafeLoader that refuses to lossily rewrite non-decimal int scalars.
+    """SafeLoader that refuses to lossily rewrite int scalars.
 
-    Identical to ``yaml.SafeLoader`` except that only plain decimal scalars
-    resolve to ints; the remaining YAML 1.1 int forms resolve to
-    ``_NonDecimalIntText`` carrying the raw text. Resolver order for all
-    other tags is preserved exactly.
+    Identical to ``yaml.SafeLoader`` except that only round-tripping decimal
+    scalars (``_DECIMAL_INT_RE``) resolve to ints; the remaining YAML 1.1 int
+    forms resolve to ``_NonDecimalIntText`` carrying the raw text. Resolver
+    order for all other tags is preserved exactly.
     """
 
 
@@ -226,10 +231,11 @@ def _coerce_variable_value(key: str, value: object, source: str) -> str:
     lowercase 'true'/'false'; plain decimal ints stringify losslessly. Floats are
     rejected because YAML silently rewrites values like ``1.10`` to ``1.1`` (a
     version or identifier corrupted with no warning) -- the user must quote such
-    values. Non-decimal int forms (``0777`` -> 511, ``1:30`` -> 90, ``0x1A`` ->
-    26) are the same lossy-rewrite class; the strict loader preserves their raw
-    text as ``_NonDecimalIntText`` and they are rejected here with a quote hint.
-    Lists/dicts and bare/null values are rejected as before.
+    values. Int forms whose text does not round-trip (``0777`` -> 511, ``1:30``
+    -> 90, ``0x1A`` -> 26, ``+7`` -> 7, ``-0`` -> 0) are the same lossy-rewrite
+    class; the strict loader preserves their raw text as ``_NonDecimalIntText``
+    and they are rejected here with a quote hint. Lists/dicts and bare/null
+    values are rejected as before.
     """
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -250,8 +256,9 @@ def _coerce_variable_value(key: str, value: object, source: str) -> str:
         )
     if isinstance(value, _NonDecimalIntText):
         raise ConfigError(
-            f"Variable '{key}' in {source} is an unquoted non-decimal number ({value}); "
-            "YAML silently rewrites values like 0777 to 511 and 1:30 to 90.",
+            f"Variable '{key}' in {source} is an unquoted number whose text does not "
+            f"round-trip ({value}); YAML silently rewrites values like 0777 to 511, "
+            "1:30 to 90, and +7 to 7.",
             hint=f'Quote it to preserve the exact text, e.g. {key}: "{value}".',
         )
     return str(value)

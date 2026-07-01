@@ -1,6 +1,8 @@
-"""Tests for tlumi.sanitize: sentinel detection and sanitization."""
+"""Tests for tlumi.sanitize: sentinel detection, sanitization, and unwrapping."""
 
 from __future__ import annotations
+
+import json
 
 from tlumi.sanitize import (
     _MAX_DEPTH,
@@ -10,7 +12,13 @@ from tlumi.sanitize import (
     _SENSITIVE_MARKER,
     _UNKNOWN_MARKER,
     _sanitize_value,
+    _unwrap_secrets,
 )
+
+
+def _wrapper(**fields: object) -> dict:
+    """Build a Pulumi secret wrapper dict with the given extra fields."""
+    return {_PULUMI_SECRET_SIG: _PULUMI_SECRET_VALUE, **fields}
 
 
 def test_sanitize_value_at_max_depth_still_sanitizes():
@@ -151,3 +159,77 @@ def test_sanitize_partial_secret_wrapper_not_replaced():
     result = _sanitize_value(fake)
     assert isinstance(result, dict)
     assert result["value"] == "data"
+
+
+# ---------------------------------------------------------------------------
+# _unwrap_secrets: --show-secrets human-display decoding of secret wrappers
+# ---------------------------------------------------------------------------
+
+
+def test_unwrap_decodes_string_plaintext():
+    """The wrapper's JSON-encoded plaintext string decodes to the raw value."""
+    wrapped = _wrapper(plaintext=json.dumps("hunter2"))
+    assert _unwrap_secrets(wrapped) == "hunter2"
+
+
+def test_unwrap_decodes_compound_plaintext():
+    """A compound plaintext (whole-dict secret) decodes to the structure."""
+    wrapped = _wrapper(plaintext=json.dumps({"user": "alice", "pass": "hunter2"}))
+    assert _unwrap_secrets(wrapped) == {"user": "alice", "pass": "hunter2"}
+
+
+def test_unwrap_nested_in_dict_preserves_structure():
+    """Wrappers nested inside dicts/lists are replaced; siblings untouched."""
+    value = {
+        "host": "example.com",
+        "password": _wrapper(plaintext=json.dumps("hunter2")),
+        "tags": [_wrapper(plaintext=json.dumps("t1")), "plain"],
+    }
+    assert _unwrap_secrets(value) == {
+        "host": "example.com",
+        "password": "hunter2",
+        "tags": ["t1", "plain"],
+    }
+
+
+def test_unwrap_without_plaintext_falls_back_to_marker():
+    """A ciphertext-only wrapper (state exported without secrets) is masked."""
+    wrapped = _wrapper(ciphertext="v1:AAAA:base64garbage")
+    assert _unwrap_secrets(wrapped) == _SENSITIVE_MARKER
+
+
+def test_unwrap_undecodable_plaintext_returns_raw_string():
+    """A plaintext field that is not valid JSON is shown as-is, not masked."""
+    wrapped = _wrapper(plaintext="not json {")
+    assert _unwrap_secrets(wrapped) == "not json {"
+
+
+def test_unwrap_non_wrapper_values_unchanged():
+    """Non-wrapper dicts, lists, and scalars pass through untouched."""
+    fake = {_PULUMI_SECRET_SIG: "not-the-magic-value", "plaintext": '"x"'}
+    assert _unwrap_secrets(fake) == fake
+    assert _unwrap_secrets("hello") == "hello"
+    assert _unwrap_secrets(42) == 42
+    assert _unwrap_secrets(None) is None
+    assert _unwrap_secrets(["a", 1]) == ["a", 1]
+
+
+def test_unwrap_does_not_mask_sentinel_strings():
+    """Unlike _sanitize_value, unwrapping leaves sentinel-ish strings alone."""
+    # A leaf string containing the sig is a display-fidelity concern for
+    # _sanitize_value only; --show-secrets mode shows stored values verbatim.
+    assert _unwrap_secrets("[secret]") == "[secret]"
+
+
+def test_unwrap_at_max_depth_returns_value_unchanged():
+    """Past the depth cap, values are returned as-is (no transformation)."""
+    wrapped = _wrapper(plaintext=json.dumps("deep"))
+    value: object = wrapped
+    for _ in range(_MAX_DEPTH + 1):
+        value = {"nested": value}
+    result = _unwrap_secrets(value)
+    inner = result
+    for _ in range(_MAX_DEPTH):
+        inner = inner["nested"]
+    # At the cap the wrapper survives untouched (helper is not a mask).
+    assert inner == {"nested": wrapped}

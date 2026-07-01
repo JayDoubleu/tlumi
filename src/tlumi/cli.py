@@ -15,8 +15,9 @@ from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, NoReturn
 
+import click
 import typer
 
 import tlumi
@@ -140,6 +141,8 @@ _show_secrets_option = Annotated[
 _TYPER_HAS_SUGGEST_COMMANDS = (
     "suggest_commands" in inspect.signature(typer.Typer.__init__).parameters
 )
+# click 8.3 added NoSuchCommand with native "Did you mean" suggestions.
+_CLICK_HAS_NATIVE_SUGGESTIONS = hasattr(click.exceptions, "NoSuchCommand")
 
 
 def _make_typer(**kwargs: Any) -> typer.Typer:
@@ -148,11 +151,13 @@ def _make_typer(**kwargs: Any) -> typer.Typer:
     typer >= 0.20 appends its own "Did you mean" onto click >= 8.3's
     UsageError, which already carries click's suggestion, so every unknown
     command printed a doubled message ("Did you mean 'state'? Did you mean
-    'state'?"). Disable typer's copy; click's native single suggestion
-    remains. The parameter does not exist below typer 0.20 (the dependency
-    floor is 0.16), hence the feature detection.
+    'state'?"). Disable typer's copy only when click's native single
+    suggestion remains (click >= 8.3, detected via NoSuchCommand); on older
+    click, typer's suggestion is the only one, so it stays on. The parameter
+    does not exist below typer 0.20 (the dependency floor is 0.16), hence
+    the feature detection on both layers.
     """
-    if _TYPER_HAS_SUGGEST_COMMANDS:
+    if _TYPER_HAS_SUGGEST_COMMANDS and _CLICK_HAS_NATIVE_SUGGESTIONS:
         kwargs["suggest_commands"] = False
     return typer.Typer(**kwargs)
 
@@ -545,7 +550,12 @@ def output(
     ctx: typer.Context,
     name: Annotated[str | None, typer.Argument(help="Specific output name to display.")] = None,
     json: Annotated[bool, typer.Option("--json", help="Output in JSON format.")] = False,
-    raw: Annotated[bool, typer.Option("--raw", help="Output raw value (no formatting).")] = False,
+    raw: Annotated[
+        bool,
+        typer.Option(
+            "--raw", help="Output raw value (no formatting; dict/list outputs emit compact JSON)."
+        ),
+    ] = False,
     show_secrets: _show_secrets_option = False,
     verbose: _verbose_option = False,
 ) -> None:
@@ -780,6 +790,21 @@ def _pacify_broken_stdout() -> None:
         pass
 
 
+def _report_failure(render: Callable[[], None], exit_code: int) -> NoReturn:
+    """Render a failure/interrupt message, then exit with ``exit_code``.
+
+    If the reader closes the pipe before the message is fully written
+    (BrokenPipeError mid-render), the failure's exit code must survive:
+    a failed command piped to a truncating reader must not report success
+    via _run's exit-0 EPIPE path.
+    """
+    try:
+        render()
+    except BrokenPipeError:
+        _pacify_broken_stdout()
+    raise typer.Exit(exit_code) from None
+
+
 def _run(fn: Callable[[], None], run_ctx: RunContext, *, windowless: bool = False) -> None:
     """Run a command function with unified error handling.
 
@@ -792,7 +817,11 @@ def _run(fn: Callable[[], None], run_ctx: RunContext, *, windowless: bool = Fals
     ``state pull`` and ``output --raw``.
 
     An early-closed stdout pipe (``tlumi show | head``) exits 0 quietly:
-    truncated output is the reader's choice, not a failure.
+    truncated output is the reader's choice, not a failure. The display
+    consoles re-raise BrokenPipeError instead of Rich's SystemExit(1) (see
+    ``_TlumiConsole``) so this handler engages for Rich output too. An EPIPE
+    that interrupts the *reporting* of a failure keeps the failure's exit
+    code (1/130) instead.
     """
     ctx = nullcontext() if (run_ctx.json_output or windowless) else create_window()
     # Windowless commands (state pull, output --raw) keep stdout a clean data
@@ -803,27 +832,42 @@ def _run(fn: Callable[[], None], run_ctx: RunContext, *, windowless: bool = Fals
             try:
                 fn()
             except EngineError as e:
+                # Rebind: the except variable is deleted when the block exits,
+                # so a lambda must close over a stable local name instead.
+                engine_err = e
                 if run_ctx.json_output:
-                    _emit_json_error(e)
-                    raise typer.Exit(1) from None
+                    _report_failure(lambda: _emit_json_error(engine_err), 1)
                 else:
-                    _handle_engine_error(e, verbose=run_ctx.verbose, stream=error_stream)
+                    # _handle_engine_error raises typer.Exit(1) itself; the
+                    # wrapper only matters when EPIPE aborts it mid-render.
+                    _report_failure(
+                        lambda: _handle_engine_error(
+                            engine_err, verbose=run_ctx.verbose, stream=error_stream
+                        ),
+                        1,
+                    )
             except TlumiError as e:
+                tlumi_err = e
                 if run_ctx.json_output:
-                    _emit_json_error(e)
+                    _report_failure(lambda: _emit_json_error(tlumi_err), 1)
                 else:
-                    print_error(e.message, e.hint, stream=error_stream)
-                raise typer.Exit(1) from None
+                    _report_failure(
+                        lambda: print_error(tlumi_err.message, tlumi_err.hint, stream=error_stream),
+                        1,
+                    )
             except KeyboardInterrupt:
-                if run_ctx.json_output:
-                    print_json(json.dumps({"error": "Interrupted"}))
-                else:
-                    # Clear the ^C line and print cleanly. Windowless commands
-                    # keep stdout a pure data channel even on interrupt.
-                    sys.stderr.write("\r")
-                    out = error_stream if error_stream is not None else console
-                    out.print("\n  [warning]Interrupted.[/warning]")
-                raise typer.Exit(130) from None
+
+                def _render_interrupt() -> None:
+                    if run_ctx.json_output:
+                        print_json(json.dumps({"error": "Interrupted"}))
+                    else:
+                        # Clear the ^C line and print cleanly. Windowless commands
+                        # keep stdout a pure data channel even on interrupt.
+                        sys.stderr.write("\r")
+                        out = error_stream if error_stream is not None else console
+                        out.print("\n  [warning]Interrupted.[/warning]")
+
+                _report_failure(_render_interrupt, 130)
             except Exception:
                 try:
                     console.show_cursor(True)

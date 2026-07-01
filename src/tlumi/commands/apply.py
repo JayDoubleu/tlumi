@@ -22,7 +22,12 @@ from tlumi.display import (
     print_success,
     print_warning,
 )
-from tlumi.engine import EventHandler, catch_engine_errors, redirect_program_stdout
+from tlumi.engine import (
+    SECRET_OUTPUTS_BLIND_HINT,
+    EventHandler,
+    catch_engine_errors,
+    redirect_program_stdout,
+)
 from tlumi.errors import TlumiError
 from tlumi.workspace import safe_export_stack
 
@@ -196,6 +201,11 @@ def run_apply(
 
         if not any([create, update, replace_count, delete, import_count]) and not outputs_changed:
             console.print("  [muted]No changes. Infrastructure is up-to-date.[/muted]")
+            if preview_handler.stack_outputs_contain_secrets:
+                # Preview scrubs secret output values to identical wrappers on
+                # both sides, so a changed secret export is invisible here; do
+                # not flatly assert up-to-date when the comparison was blind.
+                console.print(f"  [muted]{SECRET_OUTPUTS_BLIND_HINT}[/muted]")
             return
 
         print_plan_summary(

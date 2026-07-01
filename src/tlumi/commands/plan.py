@@ -7,13 +7,19 @@ from pathlib import Path
 
 from tlumi.commands._common import setup_command
 from tlumi.display import (
+    console,
     extract_changes,
     print_json,
     print_plan_summary,
     print_success,
     print_warning,
 )
-from tlumi.engine import EventHandler, catch_engine_errors, redirect_program_stdout
+from tlumi.engine import (
+    SECRET_OUTPUTS_BLIND_HINT,
+    EventHandler,
+    catch_engine_errors,
+    redirect_program_stdout,
+)
 from tlumi.errors import TlumiError
 
 
@@ -143,6 +149,17 @@ def run_plan(
         import_count=import_count,
         outputs_changed=handler.stack_outputs_changed,
     )
+    if (
+        not destroy
+        and not any([create, update, replace_count, delete, import_count])
+        and not handler.stack_outputs_changed
+        and handler.stack_outputs_contain_secrets
+    ):
+        # The summary above said "No changes", but preview scrubs secret
+        # output values to identical wrappers on both sides, so a changed
+        # secret export is invisible to the comparison. Not shown for
+        # --destroy: the apply hint would be wrong advice there.
+        console.print(f"  [muted]{SECRET_OUTPUTS_BLIND_HINT}[/muted]")
 
     if out:
         print_success(f"Plan saved to {Path(out).resolve()}")

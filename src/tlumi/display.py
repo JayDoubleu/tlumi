@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
@@ -53,14 +54,39 @@ tlumi_theme = Theme(
     }
 )
 
+
+class _TlumiConsole(Console):
+    """Console whose EPIPE handling stays catchable by ``cli._run()``.
+
+    Rich >= 13.2 intercepts BrokenPipeError inside ``Console._check_buffer``
+    and calls ``on_broken_pipe()``, whose default raises ``SystemExit(1)``,
+    a BaseException that sails past ``_run()``'s BrokenPipeError handler and
+    reproduces the silent exit 1 that handler exists to fix
+    (``tlumi show | head``). Override: mute the console first so later
+    teardown prints (window exit, Live refresh) are dropped instead of
+    re-raising, then re-raise BrokenPipeError on the main thread so
+    ``cli._run()`` decides the exit code. Non-main threads (the Live refresh
+    thread, Pulumi event callbacks) keep Rich's SystemExit convention, which
+    ``threading`` swallows silently; the muted console stops their writes and
+    the main thread still controls the process exit code. On Rich < 13.2 this
+    hook is never called and BrokenPipeError already propagates naturally.
+    """
+
+    def on_broken_pipe(self) -> None:
+        self.quiet = True
+        if threading.current_thread() is threading.main_thread():
+            raise BrokenPipeError("stdout pipe closed by reader")
+        raise SystemExit(1)
+
+
 # emoji=False: Rich substitutes :name: emoji shortcodes at render time even
 # with markup=False, silently corrupting real-world values (IPv6 groups like
 # ':ab:', MAC bytes, any ':word:' string). tlumi never uses shortcodes itself.
-console = Console(theme=tlumi_theme, emoji=False)
+console = _TlumiConsole(theme=tlumi_theme, emoji=False)
 
 # Diagnostics (log notices, warnings) go here so they never contaminate the
 # stdout data channel used by `state pull`, `output --raw`, and --json modes.
-err_console = Console(stderr=True, theme=tlumi_theme, emoji=False)
+err_console = _TlumiConsole(stderr=True, theme=tlumi_theme, emoji=False)
 
 
 def print_json(data: str) -> None:
@@ -84,7 +110,9 @@ class _AnimatedStatus:
 
     def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
         phase = int(time.monotonic() * 3) % len(_DOTS)
-        yield Text.from_markup(f"{self._base}{_DOTS[phase]}")
+        # emoji=False: Text.from_markup substitutes :name: shortcodes at
+        # construction time, before Console(emoji=False) is ever consulted.
+        yield Text.from_markup(f"{self._base}{_DOTS[phase]}", emoji=False)
 
 
 class _InstallLog:
@@ -99,7 +127,9 @@ class _InstallLog:
         parts = [f"{self._header}{_DOTS[phase]}"]
         for line in self._lines[-_INSTALL_LOG_LINES:]:
             parts.append(f"    [muted]{escape(line)}[/muted]")
-        yield Text.from_markup("\n".join(parts))
+        # emoji=False: install output can echo ':word:' sequences (URLs with
+        # ports, hashes); escape() neutralizes [markup] but not :shortcodes:.
+        yield Text.from_markup("\n".join(parts), emoji=False)
 
 
 class _LiveRenderable:

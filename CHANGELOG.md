@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (adversarial fix-review round, 2026-07)
+- **Release blocker:** `uv.lock` was regenerated for the raised pyyaml floor; CI's `uv sync --locked` (and the release pipeline) failed against the stale lock.
+- The `tlumi show | head` broken-pipe fix now actually works for Rich-rendered output: Rich >= 13.2 converts EPIPE into `SystemExit(1)` internally, so tlumi's consoles override `on_broken_pipe()` to mute and hand the error to the CLI handler. A pipe closed mid-failure-report preserves the failure exit code instead of masking it as success.
+- Secret-export blind spot mitigated: Pulumi previews scrub secret output values identically on both sides, so a changed secret export with zero resource changes cannot be detected. Interactive `apply` and human `plan` now print a note next to "No changes" when outputs contain secrets, pointing at `apply --auto-approve`; docs state the limitation.
+- Unknown-command suggestions survive every supported typer/click combination: typer's own "Did you mean" is disabled only when click >= 8.3 provides its native one (previously the combination typer >= 0.20 with click < 8.3 showed no suggestion at all). click is now a declared direct dependency.
+- The live progress window no longer rewrites `:name:` sequences to emoji (the `Text.from_markup` construction path bypassed the console-level emoji=False; all three animated renderables now pass emoji=False explicitly).
+- `show --show-secrets` and `state show --show-secrets` (human display) decode secret values to their plaintext instead of printing the raw internal wrapper dict; JSON paths are unchanged.
+- A wrong or stale `TLUMI_SECRETS_PASSPHRASE` on the default masked paths now reports the underlying "incorrect passphrase" cause with a passphrase hint, instead of a generic "Failed to read state." with a misleading unlock hint.
+- `state push` on a directory names the offending path instead of a raw file descriptor number.
+- `output NAME --raw` emits compact JSON for dict/list outputs instead of unparseable Python repr.
+- Module eviction never touches the running interpreter's own site-packages (tooling venv under a user-code root), and its guard tolerates Python 3.10's RuntimeError on symlink loops; a non-UTF-8 or pathologically nested managed-keys sidecar skips cleanup instead of crashing.
+- A preview change confined to Pulumi-internal dunder keys no longer renders a self-identical update entry.
+- Unquoted variable values whose text does not round-trip as decimal ints (`+7`, `-0`) are rejected with the quote hint, matching the `0777`/`1:30` rejection.
+- docs/architecture.html: the new `state mv` entry no longer breaks the module detail panel; the `tlumi output` data-flow text matches the masked-by-default implementation.
+- Dependabot watches the `uv` ecosystem (the `pip` ecosystem does not manage `uv.lock`); the maintainer-local Azure scenario skill was untracked along with the internal docs it references.
+
 ### Fixed (publishability audit sweep, 2026-07)
 - **Critical:** secrets nested inside composite stack outputs (a dict/list output containing a `pulumi.Output.secret(...)` member) were printed in cleartext by default by `tlumi apply` and `tlumi output` (human, `--json`, and `--raw`). The Automation API marks only whole-output secrets, so default-masked display now sources values from exported state, where every secret keeps its wrapper and is masked as `(sensitive)`. `--show-secrets` is unchanged.
 - Interactive `tlumi apply` no longer skips real work with "No changes": output-only edits (changing a `pulumi.export()` value) and pending imports now reach the confirmation prompt. Previously they were applied by `--auto-approve` but silently dropped in the default interactive flow.
@@ -14,7 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rich emoji shortcode substitution is disabled on all consoles: output values containing `:name:` sequences (IPv6 addresses, MAC addresses, literal `:tada:`) are no longer silently rewritten at display time.
 - `tlumi import` now records imported resources unprotected by default (Terraform parity), so a later `tlumi destroy` works without manual state surgery; pass `--protect` to opt into Pulumi's protection behavior. Import failures now surface engine diagnostics instead of a bare error.
 - Module-cache eviction now covers symlinked entry layouts (`src -> ../shared`, symlinked `infra.py`): helper modules reached through symlinks are re-executed between preview and apply, closing a reopened path to the interactive-apply resource-loss bug.
-- Stack config cleanup is now driven by a sidecar of keys tlumi actually wrote (`.tlumi/cache/managed_config_keys.json`); a project named like a provider namespace (e.g. `aws`) can no longer have real provider config (`aws:region`) deleted. On upgrade the first run skips cleanup and records the sidecar.
+- Stack config cleanup is now driven by a sidecar of keys tlumi actually wrote (`.tlumi/cache/managed_config_keys.json`); a project named like a provider namespace (e.g. `aws`) can no longer have real provider config (`aws:region`) deleted. On upgrade the first run skips cleanup and records the sidecar; while no sidecar exists (upgrade, tlumi clean, or a failed sidecar write), a variable removed from tlumi.yaml is never cleaned up automatically and its config entry lingers until a later run rewrites the sidecar.
 - `_mask_backend_url()` fails closed: an unparseable backend URL renders as a redacted placeholder instead of raising (non-numeric port) or leaking the raw URL.
 - `state push` symlink refusal now covers symlinked parent directories for relative paths and opens the leaf with `O_NOFOLLOW` (TOCTOU-free); absolute paths still allow platform symlinks like macOS `/tmp`.
 - `state mv` destination `type::name` parsing splits on the first `::` (consistent with resource resolution), so destination names containing `::` rename correctly; `resolve` also handles `type::name` identifiers whose name segment contains `::`.
@@ -23,9 +39,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `redact_text()` also masks passwords in empty-username URLs (`scheme://:pass@host`) and hyphenated keys (`secret-key`).
 - Re-running `tlumi init` on an initialized project re-enforces `0o700` on `.tlumi/`, takes the project name from `tlumi.yaml` instead of the directory name (a checkout dir like `my.repo` no longer fails), and non-interactive init prints the `TLUMI_SECRETS_PASSPHRASE` reminder.
 - `tlumi clean` no longer prints alarming "Unlinking symlink" warnings for expected venv-internal symlinks, and its help text states that state and backups are preserved by default.
-- CLI polish: unknown commands show a single "Did you mean" suggestion; an early-closed stdout pipe (`tlumi show | head`) exits 0 quietly instead of a silent exit 1; Ctrl+C in windowless commands (`state pull`, `output --raw`) writes to stderr, keeping stdout a clean data channel; the missing-module hint now suggests `tlumi deps add <package>` with the actual module name.
+- CLI polish: unknown commands show a single "Did you mean" suggestion; an early-closed stdout pipe (`tlumi show | head`) exits 0 quietly instead of a silent exit 1, and an EPIPE that interrupts a failure report preserves the failure exit code; Ctrl+C in windowless commands (`state pull`, `output --raw`) writes to stderr, keeping stdout a clean data channel; the missing-module hint now suggests `tlumi deps add <package>` with the actual module name.
 - Zero-change applies no longer print a dangling empty `Resources:` header ("No resources changed." instead).
-- `tlumi show` and `state show` displays filter internal dunder keys; `state show` renders Inputs/Outputs JSON with correct indentation. (`state pull` and `state show --json` remain byte-faithful.)
+- `tlumi show` and `state show` displays filter internal dunder keys recursively, matching plan diffs; `state show` renders Inputs/Outputs JSON with correct indentation. (`state pull` remains byte-faithful; `state show --json` masks secrets by default like the rest of the display surface.)
 - `~/.tlumi/cache/pulumi/` directories are created `0o700` at every level, matching the uv cache path.
 
 ### Changed (publishability audit sweep, 2026-07)

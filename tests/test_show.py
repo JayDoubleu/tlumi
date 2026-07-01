@@ -123,17 +123,19 @@ def test_show_json_empty_state(mock_find, mock_config, mock_get_stack, capsys):
 _SECRET_SIG = "4dabf18193072939515e22adb298388d"
 _SECRET_VAL = "1b47061264138c4ac30d75fd1eb44270"
 
+# Exported state (Automation API export_stack runs `stack export --show-secrets`)
+# stores each secret as the sig wrapper with a JSON-encoded plaintext field.
 _RESOURCE_WITH_SECRET = {
     "urn": "urn:pulumi:default::myproj::aws:s3:BucketV2::my-bucket",
     "type": "aws:s3:BucketV2",
     "id": "my-bucket-abc123",
     "inputs": {
         "bucket": "my-app-assets-dev",
-        "password": {_SECRET_SIG: _SECRET_VAL, "value": "[secret]"},
+        "password": {_SECRET_SIG: _SECRET_VAL, "plaintext": json.dumps("hunter2-input")},
     },
     "outputs": {
         "arn": "arn:aws:s3:::my-app-assets-dev",
-        "secret_key": {_SECRET_SIG: _SECRET_VAL, "value": "[secret]"},
+        "secret_key": {_SECRET_SIG: _SECRET_VAL, "plaintext": json.dumps("hunter2-output")},
     },
 }
 
@@ -149,7 +151,8 @@ def test_show_masks_secrets_by_default(mock_find, mock_config, mock_get_stack, c
     run_show()
     output = capsys.readouterr().out
     assert "(sensitive)" in output
-    assert "[secret]" not in output
+    assert "hunter2-input" not in output
+    assert "hunter2-output" not in output
 
 
 @patch("tlumi.commands.show.get_stack")
@@ -171,13 +174,40 @@ def test_show_json_masks_secrets_by_default(mock_find, mock_config, mock_get_sta
 @patch("tlumi.commands.show.load_config")
 @patch("tlumi.commands.show.find_project_dir")
 def test_show_secrets_revealed_with_flag(mock_find, mock_config, mock_get_stack, capsys):
-    """--show-secrets reveals secret values."""
+    """--show-secrets shows the decoded plaintext, not the raw sig wrapper."""
     mock_get_stack.return_value.export_stack.return_value = mock_state(
         [_STACK_RESOURCE, _RESOURCE_WITH_SECRET]
     )
     run_show(show_secrets=True)
     output = capsys.readouterr().out
     assert "(sensitive)" not in output
+    assert "hunter2-input" in output
+    assert "hunter2-output" in output
+    # The internal wrapper envelope must not leak into human display.
+    assert _SECRET_SIG not in output
+    assert "plaintext" not in output
+
+
+@patch("tlumi.commands.show.get_stack")
+@patch("tlumi.commands.show.load_config")
+@patch("tlumi.commands.show.find_project_dir")
+def test_show_secrets_flag_ciphertext_only_stays_masked(
+    mock_find, mock_config, mock_get_stack, capsys
+):
+    """--show-secrets on a ciphertext-only wrapper masks instead of dumping base64."""
+    resource = {
+        "urn": "urn:pulumi:default::myproj::aws:s3:BucketV2::my-bucket",
+        "type": "aws:s3:BucketV2",
+        "id": "b-1",
+        "inputs": {"password": {_SECRET_SIG: _SECRET_VAL, "ciphertext": "v1:AAAA:garbage"}},
+        "outputs": {},
+    }
+    mock_get_stack.return_value.export_stack.return_value = mock_state([_STACK_RESOURCE, resource])
+    run_show(show_secrets=True)
+    output = capsys.readouterr().out
+    assert "(sensitive)" in output
+    assert "v1:AAAA:garbage" not in output
+    assert _SECRET_SIG not in output
 
 
 # ---------------------------------------------------------------------------
@@ -269,6 +299,51 @@ def test_show_human_suppresses_dunder_only_section(mock_find, mock_config, mock_
     output = capsys.readouterr().out
     assert "Inputs:" not in output
     assert "__internal" not in output
+
+
+_BUCKET_WITH_NESTED_DUNDER = {
+    "urn": "urn:pulumi:default::myproj::aws:s3:BucketV2::my-bucket",
+    "type": "aws:s3:BucketV2",
+    "id": "my-bucket-abc123",
+    "inputs": {
+        "bucket": "my-app-assets-dev",
+        "versioning": {"__defaults": [], "enabled": True},
+    },
+    "outputs": {
+        "rules": [{"__defaults": [], "prefix": "logs/"}],
+    },
+}
+
+
+@patch("tlumi.commands.show.get_stack")
+@patch("tlumi.commands.show.load_config")
+@patch("tlumi.commands.show.find_project_dir")
+def test_show_human_hides_nested_dunder_keys(mock_find, mock_config, mock_get_stack, capsys):
+    """Dunder filtering is recursive: bridged-provider __defaults nested inside
+    object inputs (and inside lists) are hidden, matching plan-diff behavior."""
+    mock_get_stack.return_value.export_stack.return_value = mock_state(
+        [_STACK_RESOURCE, _BUCKET_WITH_NESTED_DUNDER]
+    )
+    run_show()
+    output = capsys.readouterr().out
+    assert "__defaults" not in output
+    assert "enabled" in output
+    assert "prefix" in output
+
+
+@patch("tlumi.commands.show.get_stack")
+@patch("tlumi.commands.show.load_config")
+@patch("tlumi.commands.show.find_project_dir")
+def test_show_json_keeps_nested_dunder_keys(mock_find, mock_config, mock_get_stack, capsys):
+    """show --json keeps nested bookkeeping keys: faithful state-pull envelope."""
+    mock_get_stack.return_value.export_stack.return_value = mock_state(
+        [_STACK_RESOURCE, _BUCKET_WITH_NESTED_DUNDER], version=3
+    )
+    run_show(json_output=True)
+    data = json.loads(capsys.readouterr().out)
+    bucket = [r for r in data["deployment"]["resources"] if r.get("type") == "aws:s3:BucketV2"][0]
+    assert bucket["inputs"]["versioning"]["__defaults"] == []
+    assert bucket["outputs"]["rules"][0]["__defaults"] == []
 
 
 @patch("tlumi.commands.show.get_stack")

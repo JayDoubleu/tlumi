@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -341,17 +342,19 @@ def test_push_json_output(mock_find, mock_config, mock_get_stack, tmp_path, caps
 _SECRET_SIG = "4dabf18193072939515e22adb298388d"
 _SECRET_VAL = "1b47061264138c4ac30d75fd1eb44270"
 
+# Exported state (Automation API export_stack runs `stack export --show-secrets`)
+# stores each secret as the sig wrapper with a JSON-encoded plaintext field.
 _RESOURCE_WITH_SECRET = {
     "urn": "urn:pulumi:default::myproj::aws:s3:BucketV2::my-bucket",
     "type": "aws:s3:BucketV2",
     "id": "my-bucket-abc123",
     "inputs": {
         "bucket": "my-bucket",
-        "password": {_SECRET_SIG: _SECRET_VAL, "value": "[secret]"},
+        "password": {_SECRET_SIG: _SECRET_VAL, "plaintext": json.dumps("hunter2-input")},
     },
     "outputs": {
         "arn": "arn:aws:s3:::my-bucket",
-        "secret_key": {_SECRET_SIG: _SECRET_VAL, "value": "[secret]"},
+        "secret_key": {_SECRET_SIG: _SECRET_VAL, "plaintext": json.dumps("hunter2-output")},
     },
 }
 
@@ -365,7 +368,8 @@ def test_state_show_masks_secrets_by_default(mock_find, mock_config, mock_get_st
     run_state_show("my-bucket")
     output = capsys.readouterr().out
     assert "(sensitive)" in output
-    assert "[secret]" not in output
+    assert "hunter2-input" not in output
+    assert "hunter2-output" not in output
 
 
 @patch("tlumi.commands.state.get_stack")
@@ -385,13 +389,38 @@ def test_state_show_json_masks_secrets_by_default(mock_find, mock_config, mock_g
 @patch("tlumi.commands.state.load_config")
 @patch("tlumi.commands.state.find_project_dir")
 def test_state_show_reveals_secrets_with_flag(mock_find, mock_config, mock_get_stack, capsys):
-    """state show --show-secrets reveals secret values."""
+    """state show --show-secrets shows decoded plaintext, not the sig wrapper."""
     mock_get_stack.return_value.export_stack.return_value = mock_state([_RESOURCE_WITH_SECRET])
     run_state_show("my-bucket", show_secrets=True)
     output = capsys.readouterr().out
     assert "(sensitive)" not in output
-    # Positive assertion: the raw sentinel structure should appear in output
-    assert _SECRET_SIG in output
+    assert "hunter2-input" in output
+    assert "hunter2-output" in output
+    # The internal wrapper envelope must not leak into human display.
+    assert _SECRET_SIG not in output
+    assert "plaintext" not in output
+
+
+@patch("tlumi.commands.state.get_stack")
+@patch("tlumi.commands.state.load_config")
+@patch("tlumi.commands.state.find_project_dir")
+def test_state_show_secrets_flag_ciphertext_only_stays_masked(
+    mock_find, mock_config, mock_get_stack, capsys
+):
+    """--show-secrets on a ciphertext-only wrapper masks instead of dumping base64."""
+    resource = {
+        "urn": "urn:pulumi:default::myproj::aws:s3:BucketV2::my-bucket",
+        "type": "aws:s3:BucketV2",
+        "id": "b-1",
+        "inputs": {"password": {_SECRET_SIG: _SECRET_VAL, "ciphertext": "v1:AAAA:garbage"}},
+        "outputs": {},
+    }
+    mock_get_stack.return_value.export_stack.return_value = mock_state([resource])
+    run_state_show("my-bucket", show_secrets=True)
+    output = capsys.readouterr().out
+    assert "(sensitive)" in output
+    assert "v1:AAAA:garbage" not in output
+    assert _SECRET_SIG not in output
 
 
 # --- state rm reference cleanup tests ---
@@ -948,6 +977,51 @@ def test_state_push_unreadable_file_raises_workspace_error(mock_find, tmp_path):
             run_state_push(str(state_file), auto_approve=True)
     finally:
         state_file.chmod(0o644)
+
+
+@patch("tlumi.commands.state.find_project_dir")
+def test_state_push_directory_error_names_path(mock_find, tmp_path):
+    """state push on a directory names the offending path, not a raw fd number.
+
+    os.open() succeeds on a directory, so without a pre-check the failure came
+    from os.fdopen() as 'Is a directory: <fd>' with no path in the message.
+    """
+    mock_find.return_value = tmp_path
+    target_dir = tmp_path / "backups"
+    target_dir.mkdir()
+
+    with pytest.raises(WorkspaceError) as exc_info:
+        run_state_push(str(target_dir), auto_approve=True)
+
+    assert str(target_dir) in str(exc_info.value)
+    assert "is a directory" in str(exc_info.value)
+
+
+@patch("tlumi.commands.state.find_project_dir")
+def test_state_push_fdopen_failure_closes_fd_and_names_path(mock_find, tmp_path, monkeypatch):
+    """A raced fdopen failure closes the raw fd and still names the path."""
+    mock_find.return_value = tmp_path
+    state_file = tmp_path / "state.json"
+    state_file.write_text("{}")
+
+    real_close = os.close
+    closed: list[int] = []
+
+    def fake_fdopen(fd, *args, **kwargs):
+        raise IsADirectoryError(21, "Is a directory", fd)
+
+    def spy_close(fd):
+        closed.append(fd)
+        real_close(fd)
+
+    monkeypatch.setattr("tlumi.commands.state.os.fdopen", fake_fdopen)
+    monkeypatch.setattr("tlumi.commands.state.os.close", spy_close)
+
+    with pytest.raises(WorkspaceError) as exc_info:
+        run_state_push(str(state_file), auto_approve=True)
+
+    assert str(state_file) in str(exc_info.value)
+    assert len(closed) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -2391,6 +2465,50 @@ def test_state_show_json_keeps_dunder_keys(mock_find, mock_config, mock_get_stac
     data = json.loads(capsys.readouterr().out)
     assert data["inputs"]["__internal"] == {}
     assert data["outputs"]["__pulumi_raw_state_delta"] == {"x": 1}
+
+
+_RESOURCE_WITH_NESTED_DUNDER_KEYS = {
+    "urn": "urn:pulumi:default::myproj::aws:s3:BucketV2::my-bucket",
+    "type": "aws:s3:BucketV2",
+    "id": "b-1",
+    "inputs": {
+        "bucket": "my-bucket",
+        "versioning": {"__defaults": [], "enabled": True},
+    },
+    "outputs": {
+        "rules": [{"__defaults": [], "prefix": "logs/"}],
+    },
+}
+
+
+@patch("tlumi.commands.state.get_stack")
+@patch("tlumi.commands.state.load_config")
+@patch("tlumi.commands.state.find_project_dir")
+def test_state_show_human_hides_nested_dunder_keys(mock_find, mock_config, mock_get_stack, capsys):
+    """Dunder filtering is recursive: bridged-provider __defaults nested inside
+    object inputs (and inside lists) are hidden, matching plan-diff behavior."""
+    mock_get_stack.return_value.export_stack.return_value = mock_state(
+        [_RESOURCE_WITH_NESTED_DUNDER_KEYS]
+    )
+    run_state_show("my-bucket")
+    output = capsys.readouterr().out
+    assert "__defaults" not in output
+    assert "enabled" in output
+    assert "prefix" in output
+
+
+@patch("tlumi.commands.state.get_stack")
+@patch("tlumi.commands.state.load_config")
+@patch("tlumi.commands.state.find_project_dir")
+def test_state_show_json_keeps_nested_dunder_keys(mock_find, mock_config, mock_get_stack, capsys):
+    """state show --json keeps nested bookkeeping keys (faithful dump)."""
+    mock_get_stack.return_value.export_stack.return_value = mock_state(
+        [_RESOURCE_WITH_NESTED_DUNDER_KEYS]
+    )
+    run_state_show("my-bucket", json_output=True)
+    data = json.loads(capsys.readouterr().out)
+    assert data["inputs"]["versioning"]["__defaults"] == []
+    assert data["outputs"]["rules"][0]["__defaults"] == []
 
 
 # ===========================================================================

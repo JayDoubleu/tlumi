@@ -10,7 +10,8 @@ updates:
         patterns:
           - "*"
 
-  - package-ecosystem: pip
+  # 'uv' (not 'pip') is the ecosystem that manages uv.lock.
+  - package-ecosystem: uv
     directory: /
     schedule:
       interval: weekly

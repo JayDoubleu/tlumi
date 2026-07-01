@@ -9,21 +9,11 @@ from typing import Any, cast
 from rich.markup import escape
 
 from tlumi.config import find_project_dir, load_config
+from tlumi.diffs import _strip_dunder_keys
 from tlumi.display import animated_status, console, print_json
 from tlumi.resolve import name_from_urn, type_from_urn
-from tlumi.sanitize import _sanitize_value
+from tlumi.sanitize import _sanitize_value, _unwrap_secrets
 from tlumi.workspace import get_stack, safe_export_stack
-
-
-def _strip_dunder_keys(mapping: dict[str, Any]) -> dict[str, Any]:
-    """Drop Pulumi bookkeeping keys (top-level ``__*``) for human display.
-
-    Keys like ``__internal`` and ``__pulumi_raw_state_delta`` are engine
-    internals the user never defined; plan diffs already hide them (diffs.py)
-    and the human-readable state views follow suit. JSON output paths keep
-    them: those are faithful dumps of the stored state.
-    """
-    return {k: v for k, v in mapping.items() if not k.startswith("__")}
 
 
 def run_show(json_output: bool = False, show_secrets: bool = False) -> None:
@@ -78,11 +68,19 @@ def run_show(json_output: bool = False, show_secrets: bool = False) -> None:
         inputs = r.get("inputs", {})
         outputs = r.get("outputs", {})
 
-        if not show_secrets:
+        if show_secrets:
+            # Human display decodes the exported-state secret wrappers to
+            # their plaintext values; `show --json --show-secrets` keeps the
+            # raw envelope (faithful to the state-pull format).
+            inputs = _unwrap_secrets(inputs)
+            outputs = _unwrap_secrets(outputs)
+        else:
             inputs = _sanitize_value(inputs)
             outputs = _sanitize_value(outputs)
-        # _sanitize_value can collapse a top-level secret wrapper to a string,
-        # so only dict-shaped values get the bookkeeping-key filter.
+        # Hide Pulumi bookkeeping keys ("__*", recursively, matching plan
+        # diffs). _sanitize_value/_unwrap_secrets can collapse a top-level
+        # secret wrapper to a scalar, so only dict-shaped values are filtered
+        # (and only dicts reach the .items() rendering below).
         if isinstance(inputs, dict):
             inputs = _strip_dunder_keys(inputs)
         if isinstance(outputs, dict):
@@ -101,13 +99,13 @@ def run_show(json_output: bool = False, show_secrets: bool = False) -> None:
             console.print("    Depends on:")
             for dep in deps:
                 console.print(f"      - {dep}", highlight=False, markup=False)
-        if inputs:
+        if isinstance(inputs, dict) and inputs:
             console.print("    Inputs:")
             for k, v in sorted(inputs.items()):
                 console.print(
                     f"      {k}  = {json.dumps(v, default=str)}", highlight=False, markup=False
                 )
-        if outputs:
+        if isinstance(outputs, dict) and outputs:
             console.print("    Outputs:")
             for k, v in sorted(outputs.items()):
                 console.print(

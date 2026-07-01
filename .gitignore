@@ -35,6 +35,7 @@ Pulumi.*.yaml
 todo_continue/
 docs/internal/
 .claude/TODO.md
+.claude/skills/test-azure-scenarios/
 
 # OS
 .DS_Store

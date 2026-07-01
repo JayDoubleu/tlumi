@@ -592,7 +592,7 @@ const commandData = {
   ], modules: ['config','display','errors','uv'] },
   'output': { title: 'tlumi output', subtitle: 'Display stack output values.', flags: ['--raw','--show-secrets','--json','NAME'], usesSetup: false, steps: [
     { type: 'module', title: 'Config + stack', desc: 'load_config + get_stack with animated status.' },
-    { type: 'pulumi', title: 'stack.outputs()', desc: 'Reads output values. Secret masking unless --show-secrets.' },
+    { type: 'pulumi', title: 'safe_export_stack() / stack.outputs()', desc: 'Default: masked values from exported state (nested secrets keep their wrappers, masked as (sensitive)). --show-secrets: plaintext via stack.outputs().' },
     { type: 'output', title: 'Display', desc: 'JSON or Rich formatted. --raw prints plain value.' }
   ], modules: ['config','display','errors','workspace'] },
   'show': { title: 'tlumi show', subtitle: 'Full state dump of all resources.', flags: ['--show-secrets','--json'], usesSetup: false, steps: [
@@ -623,10 +623,10 @@ const commandData = {
     { type: 'pulumi', title: 'Clean refs + import', desc: 'Removes target, cleans parent/deps/provider/propertyDeps. Writes back via import_stack().' }
   ], modules: ['config','display','errors','resolve','workspace'] },
   'state-mv': { title: 'tlumi state mv', subtitle: 'Rename a resource in state with backup.', flags: ['SOURCE','DESTINATION','--auto-approve'], usesSetup: false, steps: [
-    { title: 'Resolve', module: 'resolve.py', desc: 'Resolve source; parse destination (type::name splits on first ::).' },
-    { title: 'Backup', module: 'state.py', desc: 'Timestamped backup to .tlumi/backups/ before mutation.' },
-    { title: 'Rewrite', module: 'state.py', desc: 'Rewrites URN + all 4 reference types; warns when children exist.' },
-  ] },
+    { type: 'module', title: 'Resolve source + parse destination', desc: 'Resolves the source resource; a type::name destination splits on the FIRST :: so names containing :: work.' },
+    { type: 'security', title: 'Backup via _write_secure()', desc: 'O_CREAT|O_EXCL + 0o600. _rotate_backups() keeps last 10 per op.' },
+    { type: 'pulumi', title: 'Rewrite URN + refs + import', desc: 'Rewrites the URN positionally and all 4 reference types; warns when children exist. Writes back via import_stack().' }
+  ], modules: ['config','display','errors','resolve','workspace'] },
   'state-pull': { title: 'tlumi state pull', subtitle: 'Export state as JSON to stdout.', flags: [], usesSetup: false, steps: [
     { type: 'pulumi', title: 'get_stack(quiet=True) + export', desc: 'Always quiet. Outputs {version, deployment} JSON.' }
   ], modules: ['config','display','workspace'] },

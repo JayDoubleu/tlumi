@@ -647,6 +647,69 @@ def test_apply_interactive_detects_output_only_change(
     assert "up-to-date" not in output.lower()
 
 
+def _scrubbed_secret_wrapper() -> dict:
+    """The wrapper shape preview events carry for secret output values."""
+    from tlumi.sanitize import _PULUMI_SECRET_SIG, _PULUMI_SECRET_VALUE
+
+    return {_PULUMI_SECRET_SIG: _PULUMI_SECRET_VALUE, "ciphertext": "[secret]"}
+
+
+@patch("tlumi.commands.apply.confirm", return_value=False)
+@patch("tlumi.commands._common.get_stack")
+@patch("tlumi.commands._common.merge_variables")
+@patch("tlumi.commands._common.load_config")
+@patch("tlumi.commands._common.find_project_dir")
+def test_apply_interactive_no_changes_with_secret_outputs_prints_hint(
+    mock_find, mock_config, mock_merge, mock_get_stack, mock_confirm, capsys
+):
+    """The 'No changes' gate carries the blind-spot hint when outputs hold secrets.
+
+    Preview scrubs secret output values to the identical wrapper on both
+    sides, so a changed secret export cannot be detected; the gate must not
+    flatly assert up-to-date.
+    """
+    mock_stack = MagicMock(spec=Stack)
+    mock_stack.preview.side_effect = _emit_stack_outputs_change(
+        {"extra": _scrubbed_secret_wrapper()},
+        {"extra": _scrubbed_secret_wrapper()},
+        result=mock_preview_result({}),
+    )
+    mock_get_stack.return_value = mock_stack
+
+    run_apply(auto_approve=False, json_output=False)
+
+    mock_confirm.assert_not_called()
+    mock_stack.up.assert_not_called()
+    output = capsys.readouterr().out
+    assert "No changes" in output
+    assert "secret output values cannot be compared in preview" in output
+    assert "--auto-approve" in output
+
+
+@patch("tlumi.commands.apply.confirm", return_value=False)
+@patch("tlumi.commands._common.get_stack")
+@patch("tlumi.commands._common.merge_variables")
+@patch("tlumi.commands._common.load_config")
+@patch("tlumi.commands._common.find_project_dir")
+def test_apply_interactive_no_changes_plain_outputs_no_hint(
+    mock_find, mock_config, mock_merge, mock_get_stack, mock_confirm, capsys
+):
+    """Plain equal outputs keep the bare 'No changes' line (no blind-spot hint)."""
+    mock_stack = MagicMock(spec=Stack)
+    mock_stack.preview.side_effect = _emit_stack_outputs_change(
+        {"greeting": "world"}, {"greeting": "world"}, result=mock_preview_result({})
+    )
+    mock_get_stack.return_value = mock_stack
+
+    run_apply(auto_approve=False, json_output=False)
+
+    mock_confirm.assert_not_called()
+    mock_stack.up.assert_not_called()
+    output = capsys.readouterr().out
+    assert "No changes" in output
+    assert "secret output values" not in output
+
+
 @patch("tlumi.commands.apply.confirm", return_value=False)
 @patch("tlumi.commands._common.get_stack")
 @patch("tlumi.commands._common.merge_variables")

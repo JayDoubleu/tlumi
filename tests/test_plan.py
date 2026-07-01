@@ -439,3 +439,81 @@ def test_plan_output_only_change_not_reported_as_no_changes(
     run_plan(json_output=True)
     data = json.loads(capsys.readouterr().out)
     assert data["outputs_changed"] is True
+
+
+# ---------------------------------------------------------------------------
+# Secret-output blind spot: preview scrubs secret output values to the
+# identical wrapper on both sides, so a changed secret export value cannot be
+# detected. The human path prints a muted hint next to "No changes"; the
+# JSON contract is deliberately unchanged.
+# ---------------------------------------------------------------------------
+
+
+def _emit_scrubbed_secret_outputs(*args, **kwargs):
+    """Preview side-effect: equal Stack outputs containing a secret wrapper."""
+    from helpers import stack_outputs_event
+
+    from tlumi.sanitize import _PULUMI_SECRET_SIG, _PULUMI_SECRET_VALUE
+
+    wrapper = {_PULUMI_SECRET_SIG: _PULUMI_SECRET_VALUE, "ciphertext": "[secret]"}
+    on_event = kwargs.get("on_event")
+    if on_event is not None:
+        on_event(stack_outputs_event({"extra": wrapper}, {"extra": wrapper}))
+    return mock_preview_result({})
+
+
+@patch("tlumi.commands._common.get_stack")
+@patch("tlumi.commands._common.merge_variables")
+@patch("tlumi.commands._common.load_config")
+@patch("tlumi.commands._common.find_project_dir")
+def test_plan_human_no_changes_with_secret_outputs_prints_hint(
+    mock_find, mock_config, mock_merge, mock_get_stack, capsys
+):
+    """Human plan pairs 'No changes' with the blind-spot hint when outputs hold secrets."""
+    mock_stack = MagicMock(spec=Stack)
+    mock_stack.preview.side_effect = _emit_scrubbed_secret_outputs
+    mock_get_stack.return_value = mock_stack
+
+    run_plan(json_output=False)
+
+    out = capsys.readouterr().out
+    assert "up-to-date" in out
+    assert "secret output values cannot be compared in preview" in out
+    assert "--auto-approve" in out
+
+
+@patch("tlumi.commands._common.get_stack")
+@patch("tlumi.commands._common.merge_variables")
+@patch("tlumi.commands._common.load_config")
+@patch("tlumi.commands._common.find_project_dir")
+def test_plan_json_secret_outputs_contract_unchanged(
+    mock_find, mock_config, mock_merge, mock_get_stack, capsys
+):
+    """plan --json is unchanged by the blind-spot hint: no new keys, no hint text."""
+    mock_stack = MagicMock(spec=Stack)
+    mock_stack.preview.side_effect = _emit_scrubbed_secret_outputs
+    mock_get_stack.return_value = mock_stack
+
+    run_plan(json_output=True)
+
+    data = json.loads(capsys.readouterr().out)
+    assert set(data) == {"changes", "outputs_changed"}
+    assert data["outputs_changed"] is False
+
+
+@patch("tlumi.commands._common.get_stack")
+@patch("tlumi.commands._common.merge_variables")
+@patch("tlumi.commands._common.load_config")
+@patch("tlumi.commands._common.find_project_dir")
+def test_plan_destroy_no_secret_outputs_hint(
+    mock_find, mock_config, mock_merge, mock_get_stack, capsys
+):
+    """plan --destroy never prints the hint (its apply advice would be wrong there)."""
+    mock_stack = MagicMock(spec=Stack)
+    mock_stack.preview_destroy.side_effect = _emit_scrubbed_secret_outputs
+    mock_get_stack.return_value = mock_stack
+
+    run_plan(destroy=True, json_output=False)
+
+    out = capsys.readouterr().out
+    assert "secret output values" not in out

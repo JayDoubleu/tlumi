@@ -424,3 +424,94 @@ def test_equal_nested_container_subkey_skipped():
     )
     paths = {c.path for c in changes}
     assert paths == {"cfg.size"}
+
+
+# ---------------------------------------------------------------------------
+# A dunder-only nested change must not render a self-identical update ([5])
+# ---------------------------------------------------------------------------
+
+
+def test_expand_complex_diff_dunder_only_change_returns_empty():
+    """A value differing only in __defaults produces no PropertyChange at all."""
+    old = {"size": 1, "__defaults": []}
+    new = {"size": 1, "__defaults": ["size"]}
+    assert _expand_complex_diff("cfg", old, new, False) == []
+
+
+def test_dunder_only_change_below_subkey_emits_nothing_strategy2():
+    """A change confined to __defaults one level below a sub-key emits nothing.
+
+    Pre-fix this rendered `~ settings.network {"ip": ...} -> {"ip": ...}` with
+    byte-identical old/new values (the bridged-provider __defaults scenario).
+    """
+    old = {"network": {"ip": "1.2.3.4", "__defaults": []}}
+    new = {"network": {"ip": "1.2.3.4", "__defaults": ["x"]}}
+    changes = extract_property_diffs(
+        _meta(
+            OpType.UPDATE,
+            diffs=["settings"],
+            old_inputs={"settings": old},
+            new_inputs={"settings": new},
+        )
+    )
+    assert changes == []
+
+
+def test_dunder_only_change_below_subkey_long_values_emits_nothing():
+    """Same, with values too long for the compact branch (multiline fallback)."""
+    long_name = "n" * 80
+    old = {"network": {"ip": "10.0.0.1", "name": long_name, "__defaults": []}}
+    new = {"network": {"ip": "10.0.0.1", "name": long_name, "__defaults": ["x"]}}
+    changes = extract_property_diffs(
+        _meta(
+            OpType.UPDATE,
+            diffs=["settings"],
+            old_inputs={"settings": old},
+            new_inputs={"settings": new},
+        )
+    )
+    assert changes == []
+
+
+def test_dunder_only_change_emits_nothing_strategy1():
+    """Same suppression via the detailed_diff (Strategy 1) update path."""
+    changes = extract_property_diffs(
+        _meta(
+            OpType.UPDATE,
+            detailed_diff={"settings.network": _detailed("update")},
+            old_inputs={"settings": {"network": {"ip": "1.2.3.4", "__defaults": []}}},
+            new_inputs={"settings": {"network": {"ip": "1.2.3.4", "__defaults": ["x"]}}},
+        )
+    )
+    assert changes == []
+
+
+def test_real_change_next_to_dunder_change_still_reported():
+    """The suppression only fires for dunder-ONLY changes; real diffs survive."""
+    old = {"network": {"ip": "1.2.3.4", "__defaults": []}}
+    new = {"network": {"ip": "5.6.7.8", "__defaults": ["x"]}}
+    changes = extract_property_diffs(
+        _meta(
+            OpType.UPDATE,
+            diffs=["settings"],
+            old_inputs={"settings": old},
+            new_inputs={"settings": new},
+        )
+    )
+    assert changes
+    for c in changes:
+        assert "__defaults" not in c.path
+        assert c.old_value != c.new_value
+
+
+def test_changed_secret_still_reported_despite_identical_masking():
+    """Raw pre-sanitize comparison: two different secrets both mask to
+    (sensitive) but must still surface as an update, not be suppressed."""
+    old_secret = {_PULUMI_SECRET_SIG: _PULUMI_SECRET_VALUE, "value": "old-hunter2"}
+    new_secret = {_PULUMI_SECRET_SIG: _PULUMI_SECRET_VALUE, "value": "new-hunter2"}
+    changes = _expand_complex_diff("cfg", {"pw": old_secret}, {"pw": new_secret}, False)
+    assert len(changes) == 1
+    assert changes[0].kind == "update"
+    assert "(sensitive)" in (changes[0].old_value or "")
+    assert "old-hunter2" not in (changes[0].old_value or "")
+    assert "new-hunter2" not in (changes[0].new_value or "")

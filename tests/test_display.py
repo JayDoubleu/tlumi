@@ -11,8 +11,10 @@ from rich.console import Console
 
 from tlumi.diffs import PropertyChange
 from tlumi.display import (
+    _AnimatedStatus,
     _build_diff_text,
     _InstallLog,
+    _TlumiConsole,
     confirm,
     console,
     err_console,
@@ -595,6 +597,87 @@ def test_print_json_no_emoji_substitution(capsys):
     data = json.loads(output)
     assert data["msg"] == "deploy :tada: done"
     assert data["addr"] == "2001:db8::ab:1"
+
+
+def test_install_log_no_emoji_substitution():
+    """_InstallLog lines with ':name:' sequences render verbatim.
+
+    Text.from_markup has its own emoji=True default that substitutes
+    shortcodes at construction time, before Console(emoji=False) is ever
+    consulted; the renderable must pass emoji=False itself.
+    """
+    lines = ["Downloading pkg :ab: 44:ab:9d:00:11:22", "deploy :tada: done"]
+    rendered = _render(_InstallLog("Installing...", lines))
+    assert "44:ab:9d:00:11:22" in rendered
+    assert ":ab:" in rendered
+    assert ":tada:" in rendered
+
+
+def test_animated_status_no_emoji_substitution():
+    """_AnimatedStatus messages with ':name:' sequences render verbatim."""
+    rendered = _render(_AnimatedStatus("Checking 2001:db8::ab:1..."))
+    assert ":ab:" in rendered
+
+
+# ---------------------------------------------------------------------------
+# _TlumiConsole: EPIPE handling stays catchable by cli._run()
+# ---------------------------------------------------------------------------
+
+
+class _EpipeFile(StringIO):
+    """File whose non-empty writes fail with EPIPE."""
+
+    def write(self, s: str) -> int:
+        if s:
+            raise BrokenPipeError()
+        return 0
+
+    def isatty(self) -> bool:
+        return False
+
+
+def test_tlumi_console_print_raises_broken_pipe_in_main_thread():
+    """A broken-pipe write surfaces as BrokenPipeError, not Rich's SystemExit(1).
+
+    Rich >= 13.2 converts EPIPE into SystemExit(1) (a BaseException) inside
+    Console._check_buffer, which would sail past cli._run's handler.
+    """
+    c = _TlumiConsole(file=_EpipeFile())
+    with pytest.raises(BrokenPipeError):
+        c.print("data the reader will never see")
+
+
+def test_tlumi_console_on_broken_pipe_mutes_console():
+    """on_broken_pipe() mutes the console so teardown prints are dropped."""
+    c = _TlumiConsole(file=_EpipeFile())
+    with pytest.raises(BrokenPipeError):
+        c.on_broken_pipe()
+    assert c.quiet is True
+    c.print("dropped, not raised")  # must not raise on the muted console
+
+
+def test_tlumi_console_on_broken_pipe_worker_thread_raises_system_exit():
+    """Non-main threads keep Rich's SystemExit convention (threading swallows it).
+
+    The Live refresh thread and Pulumi event callbacks must not propagate
+    BrokenPipeError through threading.excepthook as a stderr traceback.
+    """
+    import threading
+
+    c = _TlumiConsole(file=_EpipeFile())
+    caught: dict[str, BaseException] = {}
+
+    def worker() -> None:
+        try:
+            c.on_broken_pipe()
+        except BaseException as e:  # noqa: BLE001 - asserting the exact type
+            caught["exc"] = e
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join()
+    assert isinstance(caught["exc"], SystemExit)
+    assert c.quiet is True
 
 
 # ---------------------------------------------------------------------------

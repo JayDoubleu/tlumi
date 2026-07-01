@@ -783,15 +783,16 @@ def test_load_config_no_warning_for_known_keys(tmp_path, caplog):
 
 
 # ---------------------------------------------------------------------------
-# Hardening sweep: non-decimal int variables are lossy under YAML 1.1 and
-# must be rejected like floats (0777 -> 511, 1:30 -> 90 with no warning)
+# Hardening sweep: int variables whose text does not round-trip are lossy
+# under YAML 1.1 and must be rejected like floats (0777 -> 511, 1:30 -> 90,
+# +7 -> 7 with no warning)
 # ---------------------------------------------------------------------------
 
 
 def test_load_config_rejects_octal_int_variable(tmp_path):
     """A leading-zero octal variable is rejected with the ORIGINAL text, not 511."""
     (tmp_path / "tlumi.yaml").write_text("project:\n  name: myproj\nvariables:\n  mode: 0777\n")
-    with pytest.raises(ConfigError, match="non-decimal") as excinfo:
+    with pytest.raises(ConfigError, match="does not round-trip") as excinfo:
         load_config(tmp_path)
     # The value echoed back is the user's raw text, not PyYAML's int rewrite.
     assert "(0777)" in str(excinfo.value)
@@ -802,7 +803,7 @@ def test_load_config_rejects_octal_int_variable(tmp_path):
 def test_load_config_rejects_sexagesimal_int_variable(tmp_path):
     """A sexagesimal value (1:30 -> 90 under YAML 1.1) is rejected."""
     (tmp_path / "tlumi.yaml").write_text("project:\n  name: myproj\nvariables:\n  duration: 1:30\n")
-    with pytest.raises(ConfigError, match="non-decimal") as excinfo:
+    with pytest.raises(ConfigError, match="does not round-trip") as excinfo:
         load_config(tmp_path)
     assert "1:30" in str(excinfo.value)
 
@@ -810,14 +811,14 @@ def test_load_config_rejects_sexagesimal_int_variable(tmp_path):
 def test_load_config_rejects_hex_int_variable(tmp_path):
     """A hex value (0x1A -> 26 under YAML 1.1) is rejected."""
     (tmp_path / "tlumi.yaml").write_text("project:\n  name: myproj\nvariables:\n  flag: 0x1A\n")
-    with pytest.raises(ConfigError, match="non-decimal"):
+    with pytest.raises(ConfigError, match="does not round-trip"):
         load_config(tmp_path)
 
 
 def test_load_config_rejects_underscore_int_variable(tmp_path):
     """An underscore-separated value (1_000 -> 1000 under YAML 1.1) is rejected."""
     (tmp_path / "tlumi.yaml").write_text("project:\n  name: myproj\nvariables:\n  size: 1_000\n")
-    with pytest.raises(ConfigError, match="non-decimal"):
+    with pytest.raises(ConfigError, match="does not round-trip"):
         load_config(tmp_path)
 
 
@@ -835,6 +836,29 @@ def test_load_config_negative_int_variable_allowed(tmp_path):
     assert config.variables["offset"] == "-17"
 
 
+# Adversarial review [19]: '+7' and '-0' parse to ints whose stringification
+# drops the sign ('+7' -> '7', '-0' -> '0'), silently rewriting the text. They
+# must be rejected like the other lossy forms, not accepted by _DECIMAL_INT_RE.
+
+
+@pytest.mark.parametrize("text", ["+7", "-0", "007"])
+def test_load_config_rejects_lossy_int_forms(tmp_path, text):
+    """Int forms whose text does not round-trip are rejected with the raw text."""
+    (tmp_path / "tlumi.yaml").write_text(f"project:\n  name: myproj\nvariables:\n  v: {text}\n")
+    with pytest.raises(ConfigError, match="does not round-trip") as excinfo:
+        load_config(tmp_path)
+    assert f"({text})" in str(excinfo.value)
+    assert f'v: "{text}"' in (excinfo.value.hint or "")
+
+
+@pytest.mark.parametrize(("text", "expected"), [("0", "0"), ("-12", "-12"), ("7", "7")])
+def test_load_config_round_tripping_ints_still_allowed(tmp_path, text, expected):
+    """Zero and signless/negative decimals round-trip and stay accepted."""
+    (tmp_path / "tlumi.yaml").write_text(f"project:\n  name: myproj\nvariables:\n  v: {text}\n")
+    config = load_config(tmp_path)
+    assert config.variables["v"] == expected
+
+
 def test_load_config_bool_variable_still_lowercase(tmp_path):
     """The strict int loader leaves YAML bool coercion untouched."""
     (tmp_path / "tlumi.yaml").write_text("project:\n  name: myproj\nvariables:\n  debug: True\n")
@@ -848,7 +872,7 @@ def test_merge_variables_rejects_octal_in_var_file(tmp_path):
     config = load_config(tmp_path)
     var_file = tmp_path / "vars.yaml"
     var_file.write_text("mode: 0644\n")
-    with pytest.raises(ConfigError, match="non-decimal") as excinfo:
+    with pytest.raises(ConfigError, match="does not round-trip") as excinfo:
         merge_variables(config, var_file=[str(var_file)])
     assert "0644" in str(excinfo.value)
 

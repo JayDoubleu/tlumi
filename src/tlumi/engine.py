@@ -28,8 +28,44 @@ from tlumi.display import LiveDisplay, WindowLiveProxy, _get_active_window, cons
 from tlumi.errors import Diagnostic, EngineError
 from tlumi.redact import redact_text
 from tlumi.resolve import display_from_urn, name_from_urn
+from tlumi.sanitize import _MAX_DEPTH, _PULUMI_SECRET_SIG, _PULUMI_SECRET_VALUE
 
 _log = logging.getLogger(__name__)
+
+# Hint printed by plan/apply when nothing is pending but the Stack outputs
+# contain secrets: preview scrubs secret output values to the identical
+# wrapper on both the old and new side, so a changed secret export value is
+# invisible to the outputs comparison (see stack_outputs_changed).
+SECRET_OUTPUTS_BLIND_HINT = (
+    "Note: secret output values cannot be compared in preview."
+    " If a secret export changed, apply it with 'tlumi apply --auto-approve'."
+)
+
+
+def _contains_secret_wrapper(value: object, _depth: int = 0) -> bool:
+    """True when a Pulumi secret-sig wrapper appears anywhere in ``value``.
+
+    Preview events scrub every secret output value to the identical wrapper
+    dict on BOTH the old and new side (the Automation API's ``preview()``
+    cannot request unscrubbed secrets), so an equality comparison of Stack
+    outputs is blind to changed secret values. Callers use this to know the
+    comparison could not see secret changes. Returns True at the depth limit
+    as the conservative default: a spurious hint is harmless, while a missed
+    one asserts "up-to-date" over a pending secret change.
+    """
+    if _depth >= _MAX_DEPTH:
+        return True
+    if isinstance(value, dict):
+        if value.get(_PULUMI_SECRET_SIG) == _PULUMI_SECRET_VALUE:
+            return True
+        return any(_contains_secret_wrapper(v, _depth + 1) for v in value.values())
+    if isinstance(value, list):
+        return any(_contains_secret_wrapper(v, _depth + 1) for v in value)
+    if isinstance(value, str):
+        # Defense in depth, mirroring sanitize.py: the sig may survive inside
+        # a leaf string (embedded JSON) even when the wrapper-dict form is lost.
+        return _PULUMI_SECRET_SIG in value
+    return False
 
 
 class _OpDisplay(NamedTuple):
@@ -161,7 +197,11 @@ class _AnimatedLog:
         markup = "\n".join(
             ln.replace("...", dots) if animate else ln for ln, animate in self._lines
         )
-        yield Text.from_markup(markup)
+        # emoji=False: Text.from_markup substitutes :name: shortcodes at
+        # construction time regardless of the console's emoji setting, which
+        # would corrupt provider data containing :word: sequences (IPv6
+        # groups like :ab:, MAC bytes). escape() does not neutralize these.
+        yield Text.from_markup(markup, emoji=False)
 
 
 @contextmanager
@@ -215,6 +255,12 @@ class EventHandler:
         # pulumi.export() value) emit SAME for every resource, so op counts
         # alone cannot detect them; commands gate "No changes" on this too.
         self._stack_outputs_changed: bool = False
+        # Set during preview when either side of the Stack outputs comparison
+        # contains a secret-sig wrapper: the comparison above is blind to
+        # changed secret values (both sides arrive scrubbed to the identical
+        # wrapper), so commands print SECRET_OUTPUTS_BLIND_HINT instead of
+        # asserting up-to-date when nothing else is pending.
+        self._stack_outputs_contain_secrets: bool = False
         # Per-op count of the resources the engine actually displays (non-Stack,
         # non-SAME, replacements counted once). Pulumi's change_summary is an
         # unreliable basis for the user-facing summary: it counts the hidden
@@ -233,13 +279,31 @@ class EventHandler:
     def stack_outputs_changed(self) -> bool:
         """True when preview saw the Stack resource's outputs change.
 
-        This is the only signal for output-only changes: Pulumi previews an
+        This is the signal for output-only changes: Pulumi previews an
         edited ``pulumi.export()`` value as SAME ops everywhere (even
         change_summary reports only ``same``), while the final Stack
         res_outputs_event carries the pending outputs in ``new.outputs``.
         Verified against a live stack; see tests for the event shapes.
+
+        Blind spot: secret output values are scrubbed to the identical
+        secret-sig wrapper on BOTH the old and new side of the event (the
+        Automation API's ``preview()`` cannot request unscrubbed secrets),
+        so a changed secret export value with zero resource changes leaves
+        this flag False. ``stack_outputs_contain_secrets`` reports when the
+        comparison was blind; applying such a change requires
+        ``apply --auto-approve`` (which skips the preview gate).
         """
         return self._stack_outputs_changed
+
+    @property
+    def stack_outputs_contain_secrets(self) -> bool:
+        """True when preview saw a secret-sig wrapper in the Stack outputs.
+
+        Signals that the ``stack_outputs_changed`` comparison was blind to
+        secret values; commands use it to print SECRET_OUTPUTS_BLIND_HINT
+        alongside "No changes" instead of flatly asserting up-to-date.
+        """
+        return self._stack_outputs_contain_secrets
 
     def _count_op(self, op: OpType) -> None:
         """Tally a displayed resource operation for the user-facing summary."""
@@ -384,6 +448,8 @@ class EventHandler:
                 new_outputs = (getattr(meta.new, "outputs", None) if meta.new else None) or {}
                 if new_outputs != old_outputs:
                     self._stack_outputs_changed = True
+                if _contains_secret_wrapper(old_outputs) or _contains_secret_wrapper(new_outputs):
+                    self._stack_outputs_contain_secrets = True
         if event.resource_pre_event:
             meta = event.resource_pre_event.metadata
             if meta.type == "pulumi:pulumi:Stack" or meta.op == OpType.SAME:

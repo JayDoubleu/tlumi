@@ -909,6 +909,61 @@ def test_get_stack_corrupt_sidecar_skips_removal(tmp_path, monkeypatch):
     assert json.loads(sidecar.read_text()) == {"keys": []}
 
 
+def test_get_stack_non_utf8_sidecar_skips_removal(tmp_path, monkeypatch):
+    """A non-UTF-8 sidecar is malformed content, not a crash.
+
+    read_text() raises UnicodeDecodeError (not JSONDecodeError) on byte-level
+    corruption; it must be treated like any other corrupt sidecar: skip
+    removal, rewrite the sidecar, never abort the runtime command.
+    """
+    import json
+
+    config = _make_project(tmp_path, yaml_extra="secrets:\n  allow_unencrypted: true\n")
+    sidecar = tmp_path / ".tlumi" / "cache" / "managed_config_keys.json"
+    sidecar.write_bytes(b'{"keys": ["ab\xff"]}')
+    monkeypatch.delenv("TLUMI_SECRETS_PASSPHRASE", raising=False)
+
+    from tlumi.workspace import get_stack
+
+    mock_stack = MagicMock(spec=Stack)
+    mock_stack.get_all_config.return_value = {"myproj:old_key": MagicMock()}
+
+    with (
+        patch("tlumi.workspace._ensure_pulumi_cli"),
+        patch("tlumi.workspace._load_inline_program", return_value=lambda: None),
+        patch("tlumi.workspace.auto.create_or_select_stack", return_value=mock_stack),
+    ):
+        get_stack(config)  # must not raise UnicodeDecodeError
+
+    mock_stack.remove_config.assert_not_called()
+    assert json.loads(sidecar.read_text()) == {"keys": []}
+
+
+def test_get_stack_deeply_nested_sidecar_skips_removal(tmp_path, monkeypatch):
+    """A pathologically nested JSON sidecar (RecursionError) is treated as corrupt."""
+    import json
+
+    config = _make_project(tmp_path, yaml_extra="secrets:\n  allow_unencrypted: true\n")
+    sidecar = tmp_path / ".tlumi" / "cache" / "managed_config_keys.json"
+    sidecar.write_text("[" * 100_000 + "]" * 100_000)
+    monkeypatch.delenv("TLUMI_SECRETS_PASSPHRASE", raising=False)
+
+    from tlumi.workspace import get_stack
+
+    mock_stack = MagicMock(spec=Stack)
+    mock_stack.get_all_config.return_value = {"myproj:old_key": MagicMock()}
+
+    with (
+        patch("tlumi.workspace._ensure_pulumi_cli"),
+        patch("tlumi.workspace._load_inline_program", return_value=lambda: None),
+        patch("tlumi.workspace.auto.create_or_select_stack", return_value=mock_stack),
+    ):
+        get_stack(config)  # must not raise RecursionError
+
+    mock_stack.remove_config.assert_not_called()
+    assert json.loads(sidecar.read_text()) == {"keys": []}
+
+
 def test_get_stack_symlinked_sidecar_ignored(tmp_path, monkeypatch, caplog):
     """A symlinked sidecar is ignored for reads and never followed for writes."""
     import logging
@@ -985,6 +1040,64 @@ def test_get_stack_remove_config_failure_raises(tmp_path, monkeypatch):
     ):
         with pytest.raises(WSError, match="Failed to remove stale config key"):
             get_stack(config)
+
+
+# ---------------------------------------------------------------------------
+# safe_export_stack: underlying CommandError detail surfaced, redacted,
+# with a cause-specific hint (rf-9)
+# ---------------------------------------------------------------------------
+
+
+def _export_command_error(stderr):
+    """Build a real CommandError carrying the given Pulumi stderr text."""
+    from pulumi.automation import CommandError, CommandResult
+
+    return CommandError(CommandResult(stdout="", stderr=stderr, code=255))
+
+
+def test_safe_export_stack_incorrect_passphrase_hint():
+    """A wrong decryption passphrase surfaces the cause and a passphrase hint.
+
+    Regression: the wrapper used to swallow the CommandError entirely, so the
+    default masked output/apply paths reported a bare 'Failed to read state.'
+    with a misleading state-unlock hint for a wrong TLUMI_SECRETS_PASSPHRASE.
+    """
+    from tlumi.errors import WorkspaceError as WSError
+    from tlumi.workspace import safe_export_stack
+
+    mock_stack = MagicMock(spec=Stack)
+    mock_stack.export_stack.side_effect = _export_command_error(
+        "error: failed to decrypt encrypted configuration value: Incorrect Passphrase,"
+        " please set PULUMI_CONFIG_PASSPHRASE"
+    )
+
+    with pytest.raises(WSError) as excinfo:
+        safe_export_stack(mock_stack)
+
+    assert "Failed to read state:" in excinfo.value.message
+    # The underlying cause is visible (case-insensitive match on the code side).
+    assert "incorrect passphrase" in excinfo.value.message.lower()
+    assert "TLUMI_SECRETS_PASSPHRASE" in (excinfo.value.hint or "")
+
+
+def test_safe_export_stack_generic_error_keeps_unlock_hint_and_redacts():
+    """Other failures keep the unlock hint; credentials in stderr are redacted."""
+    from tlumi.errors import WorkspaceError as WSError
+    from tlumi.workspace import safe_export_stack
+
+    mock_stack = MagicMock(spec=Stack)
+    mock_stack.export_stack.side_effect = _export_command_error(
+        "error: the stack is currently locked by 1 lock(s):"
+        " https://user:hunter2@backend.example/state/lock"
+    )
+
+    with pytest.raises(WSError) as excinfo:
+        safe_export_stack(mock_stack)
+
+    assert "Failed to read state:" in excinfo.value.message
+    assert "currently locked" in excinfo.value.message
+    assert "hunter2" not in excinfo.value.message  # redact_text applied
+    assert "state unlock" in (excinfo.value.hint or "")
 
 
 # ---------------------------------------------------------------------------
@@ -1478,6 +1591,97 @@ def test_evict_project_modules_tolerates_pathological_file(tmp_path, monkeypatch
     assert "bad_file_int_mod" in sys.modules
     assert "bad_file_nul_mod" in sys.modules
     sys.modules.pop("_tlumi_entry.infra", None)
+
+
+@pytest.mark.parametrize("prefix_attr", ["prefix", "base_prefix"])
+def test_evict_project_modules_keeps_interpreter_prefix_modules(tmp_path, monkeypatch, prefix_attr):
+    """Modules under the interpreter's own prefix survive eviction.
+
+    Regression for rf-11: when the venv tlumi runs from sits under a
+    user-code root (e.g. a shared tooling venv inside the project dir),
+    eviction must not delete the pulumi SDK or tlumi itself from
+    sys.modules; the user program's next 'import pulumi' would otherwise
+    re-execute the whole SDK with fresh globals, losing runtime settings
+    and sdk_compat patches.
+    """
+    import types
+
+    config = _make_project(tmp_path)
+
+    # A fake tooling venv INSIDE the project dir (a user-code root).
+    tool_venv = tmp_path / "toolvenv"
+    sdk_dir = tool_venv / "lib" / "python3.13" / "site-packages" / "pulumi_fake"
+    sdk_dir.mkdir(parents=True)
+    sdk_file = sdk_dir / "__init__.py"
+    sdk_file.write_text("")
+    sdk_mod = types.ModuleType("pulumi_fake_sdk_mod")
+    sdk_mod.__file__ = str(sdk_file)
+
+    # Control: a plain project helper must still be evicted.
+    helper_file = tmp_path / "plain_helper.py"
+    helper_file.write_text("")
+    helper_mod = types.ModuleType("plain_helper_mod")
+    helper_mod.__file__ = str(helper_file)
+
+    monkeypatch.setattr(sys, prefix_attr, str(tool_venv))
+    monkeypatch.setitem(sys.modules, "pulumi_fake_sdk_mod", sdk_mod)
+    monkeypatch.setitem(sys.modules, "plain_helper_mod", helper_mod)
+    monkeypatch.setattr(sys, "path", sys.path.copy())
+    monkeypatch.delitem(sys.modules, "_tlumi_entry.infra", raising=False)
+
+    from tlumi.workspace import _load_inline_program
+
+    program = _load_inline_program(config)
+    try:
+        program()
+    finally:
+        sys.modules.pop("_tlumi_entry.infra", None)
+
+    assert "pulumi_fake_sdk_mod" in sys.modules, "interpreter-owned module must stay cached"
+    assert "plain_helper_mod" not in sys.modules, "user helper must still be evicted"
+
+
+def test_evict_project_modules_tolerates_symlink_loop_runtimeerror(tmp_path, monkeypatch):
+    """RuntimeError from Path.resolve() (Python 3.10 symlink loops) is skipped.
+
+    On Python 3.10 Path.resolve() raises RuntimeError when the path traverses
+    a symlink loop (3.11+ returns quietly). A cached module whose __file__
+    hits such a loop mid-run must be skipped, not abort program(). Simulated
+    by patching resolve for that one path, since 3.11+ cannot reproduce the
+    loop organically.
+    """
+    import types
+    from pathlib import Path
+
+    config = _make_project(tmp_path)
+
+    loopy_file = str(tmp_path / "loopy_helper.py")
+    loopy_mod = types.ModuleType("loopy_helper_mod")
+    loopy_mod.__file__ = loopy_file
+    monkeypatch.setitem(sys.modules, "loopy_helper_mod", loopy_mod)
+    monkeypatch.setattr(sys, "path", sys.path.copy())
+    monkeypatch.delitem(sys.modules, "_tlumi_entry.infra", raising=False)
+
+    from tlumi.workspace import _load_inline_program
+
+    # Build program() first: root construction may resolve paths too.
+    program = _load_inline_program(config)
+
+    original_resolve = Path.resolve
+
+    def raising_resolve(self, *args, **kwargs):
+        if str(self) == loopy_file:
+            raise RuntimeError(f"Symlink loop from '{loopy_file}'")
+        return original_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", raising_resolve)
+    try:
+        program()  # must not raise RuntimeError from the eviction loop
+    finally:
+        sys.modules.pop("_tlumi_entry.infra", None)
+
+    # The looping module was skipped, not evicted.
+    assert "loopy_helper_mod" in sys.modules
 
 
 # ---------------------------------------------------------------------------

@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import io
 import json
+import subprocess  # nosec B404 - tests spawn the venv python for a real-pipe check
 import sys
+import textwrap
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -103,48 +107,171 @@ def test_run_keyboard_interrupt_windowless_routes_to_stderr(capsys):
 
 # ---------------------------------------------------------------------------
 # _run: BrokenPipeError (stdout reader closed the pipe early)
+#
+# These exercise the REAL mechanism: writes through the shared Rich display
+# console fail with EPIPE, like `tlumi show | head`. Rich >= 13.2 intercepts
+# BrokenPipeError inside Console._check_buffer and raises SystemExit(1);
+# display._TlumiConsole re-raises BrokenPipeError so _run's handler engages.
 # ---------------------------------------------------------------------------
+
+
+class _BrokenPipeFile(io.TextIOBase):
+    """File whose non-empty writes fail with EPIPE, like a closed-reader pipe."""
+
+    def write(self, s: str) -> int:
+        if s:
+            raise BrokenPipeError()
+        return 0
+
+    def flush(self) -> None:
+        pass
+
+    def isatty(self) -> bool:
+        return False
+
+
+@contextmanager
+def _broken_stdout_console():
+    """Point the shared display console at an EPIPE-raising file.
+
+    Restores the console's file AND its quiet flag: _TlumiConsole mutes
+    itself on the first EPIPE, which would silence every later test. Also
+    drops Rich's internal buffer: a failed write leaves its segments queued
+    (rich clears the buffer only after a successful write), and they would
+    re-flush into the next test's captured stdout. In production the muted
+    console discards them on its next print, and the process exits anyway.
+    """
+    import tlumi.display as display
+
+    orig_file = display.console._file
+    orig_quiet = display.console.quiet
+    display.console.file = _BrokenPipeFile()
+    try:
+        yield
+    finally:
+        display.console._file = orig_file
+        display.console.quiet = orig_quiet
+        del display.console._buffer[:]
 
 
 @patch("tlumi.cli._pacify_broken_stdout")
 def test_run_broken_pipe_exits_zero(mock_pacify, capsys):
-    """BrokenPipeError from fn (e.g. `tlumi show | head`) exits 0 quietly."""
+    """EPIPE surfacing through console.print (`tlumi show | head`) exits 0 quietly."""
 
-    def boom():
-        raise BrokenPipeError()
+    def fn():
+        from tlumi.display import console
 
-    with pytest.raises(typer.Exit) as exc_info:
-        _run(boom, RunContext(json_output=True))
+        for i in range(50):
+            console.print(f"resource line {i}")
+
+    with _broken_stdout_console():
+        with pytest.raises(typer.Exit) as exc_info:
+            _run(fn, RunContext())
     assert exc_info.value.exit_code == 0
     mock_pacify.assert_called_once()
-    captured = capsys.readouterr()
-    assert captured.err == ""
+    assert capsys.readouterr().err == ""
 
 
 @patch("tlumi.cli._pacify_broken_stdout")
-def test_run_broken_pipe_windowless_exits_zero(mock_pacify):
+def test_run_broken_pipe_windowless_exits_zero(mock_pacify, capsys):
     """Windowless commands (state pull, output --raw) also exit 0 on EPIPE."""
+    from tlumi.display import print_json as display_print_json
 
-    def boom():
-        raise BrokenPipeError()
+    def fn():
+        display_print_json('{"version": 3, "deployment": {}}')
 
-    with pytest.raises(typer.Exit) as exc_info:
-        _run(boom, RunContext(), windowless=True)
+    with _broken_stdout_console():
+        with pytest.raises(typer.Exit) as exc_info:
+            _run(fn, RunContext(), windowless=True)
     assert exc_info.value.exit_code == 0
     mock_pacify.assert_called_once()
+    assert capsys.readouterr().err == ""
 
 
 @patch("tlumi.cli._pacify_broken_stdout")
-@patch("tlumi.cli.create_window")
-def test_run_broken_pipe_from_window_teardown_exits_zero(mock_window, mock_pacify):
-    """EPIPE raised during window teardown (after fn succeeded) also exits 0."""
-    mock_window.return_value.__enter__ = MagicMock()
-    mock_window.return_value.__exit__ = MagicMock(side_effect=BrokenPipeError())
+def test_run_broken_pipe_from_window_teardown_exits_zero(mock_pacify, capsys):
+    """EPIPE raised during real window teardown (after fn succeeded) also exits 0.
 
-    with pytest.raises(typer.Exit) as exc_info:
-        _run(lambda: None, RunContext())
+    The window's __exit__ prints a trailing newline through the display
+    console; with the reader gone that write is the first to hit EPIPE.
+    """
+    with _broken_stdout_console():
+        with pytest.raises(typer.Exit) as exc_info:
+            _run(lambda: None, RunContext())
     assert exc_info.value.exit_code == 0
     mock_pacify.assert_called_once()
+    assert capsys.readouterr().err == ""
+
+
+@patch("tlumi.cli._pacify_broken_stdout")
+def test_run_broken_pipe_during_error_report_keeps_exit_one(mock_pacify):
+    """EPIPE while printing a failure must not convert exit 1 into exit 0.
+
+    A failed command piped to a truncating reader must still report failure;
+    both the JSON envelope path and the Rich print_error path are covered.
+    """
+
+    def boom():
+        raise TlumiError("real failure")
+
+    for run_ctx in (RunContext(json_output=True), RunContext()):
+        with _broken_stdout_console():
+            with pytest.raises(typer.Exit) as exc_info:
+                _run(boom, run_ctx)
+        assert exc_info.value.exit_code == 1
+
+
+@patch("tlumi.cli._pacify_broken_stdout")
+def test_run_broken_pipe_during_interrupt_report_keeps_exit_130(mock_pacify):
+    """EPIPE while printing the JSON interrupt envelope keeps exit 130."""
+
+    def boom():
+        raise KeyboardInterrupt()
+
+    with _broken_stdout_console():
+        with pytest.raises(typer.Exit) as exc_info:
+            _run(boom, RunContext(json_output=True))
+    assert exc_info.value.exit_code == 130
+
+
+def test_run_broken_pipe_end_to_end_subprocess():
+    """Real pipe: child prints through _run, reader closes early, child exits 0.
+
+    This is the actual `tlumi show | head` mechanism end-to-end: a fresh
+    process, a real OS pipe whose read end closes after 50 bytes, Rich
+    console output, and an empty stderr.
+    """
+    script = textwrap.dedent(
+        """
+        import sys
+        import typer
+        import tlumi.cli as cli
+        from tlumi.display import console
+
+        def fn():
+            for i in range(5000):
+                console.print(f"resource line {i} with some padding text")
+
+        try:
+            cli._run(fn, cli.RunContext())
+        except typer.Exit as e:
+            raise SystemExit(e.exit_code)
+        raise SystemExit(0)
+        """
+    )
+    proc = subprocess.Popen(  # nosec B603 - fixed argv, venv python, test-only
+        [sys.executable, "-c", script],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert proc.stdout is not None and proc.stderr is not None
+    proc.stdout.read(50)
+    proc.stdout.close()  # reader hangs up -> child's next write gets EPIPE
+    stderr = proc.stderr.read()
+    proc.stderr.close()
+    returncode = proc.wait(timeout=30)
+    assert returncode == 0, stderr.decode()
+    assert stderr == b""
 
 
 def test_run_success():

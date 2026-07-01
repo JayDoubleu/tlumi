@@ -408,7 +408,16 @@ def _expand_complex_diff(
     Falls back to a single PropertyChange with formatted values when:
     - One or both sides are not dict/list (scalar)
     - Both sides are compact enough to fit inline (<=60 chars)
+
+    Returns [] when the values differ only inside Pulumi-internal dunder keys
+    (__defaults etc.): once those are stripped for display, the rendered old
+    and new would be byte-identical, which reads as an unexplainable no-op
+    update. The comparison uses RAW stripped values (pre-sanitize) so
+    genuinely changed secrets that both mask to (sensitive) still differ raw
+    and are still reported.
     """
+    if _deep_equal(_strip_dunder_keys(old_val), _strip_dunder_keys(new_val)):
+        return []
     if not (isinstance(old_val, (dict, list)) and isinstance(new_val, (dict, list))):
         old_fmt, new_fmt = _format_update_pair(old_val, new_val)
         return [
@@ -477,7 +486,11 @@ def _expand_complex_diff(
                 )
             )
 
-    # If expansion produced nothing (all same), fall back to single change
+    # If expansion produced nothing, the raw values differ (the dunder-strip
+    # check above returned) but every sanitized leaf compares equal -- e.g.
+    # changed secrets that both mask to (sensitive). Fall back to a single
+    # change so the update is not silently hidden, even though the rendered
+    # values may look identical.
     if not changes:
         return [
             PropertyChange.update(

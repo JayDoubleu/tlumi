@@ -373,25 +373,34 @@ def _load_inline_program(config: ProjectConfig) -> Callable[[], None]:
         entry.resolve().parent,
     }
     # .tlumi/ is excluded in both forms too: its venv site-packages hold
-    # provider SDKs that must stay cached.
-    tlumi_roots = {config.tlumi_dir, config.tlumi_dir.resolve()}
+    # provider SDKs that must stay cached. The running interpreter's own
+    # prefixes (sys.prefix / sys.base_prefix, both forms) are excluded for
+    # the same reason: when the venv tlumi runs from sits under a user-code
+    # root (e.g. a shared tooling venv inside a symlink-resolved
+    # 'src -> ../shared' layout), evicting the pulumi SDK or tlumi itself
+    # would make the user program's next 'import pulumi' re-execute the SDK
+    # with fresh globals, losing runtime settings and sdk_compat patches.
+    keep_roots = {config.tlumi_dir, config.tlumi_dir.resolve()}
+    for prefix in (sys.prefix, sys.base_prefix):
+        prefix_path = Path(prefix)
+        keep_roots.update((prefix_path, prefix_path.resolve()))
 
     def _under_any(path: Path, roots: set[Path]) -> bool:
         return any(path.is_relative_to(root) for root in roots)
 
     def _evict_project_modules() -> None:
         # Evict every cached module whose source lives inside a user-code root
-        # (excluding .tlumi/, whose venv site-packages hold provider SDKs that
-        # must stay cached). Popping only the entry module is not enough: any
-        # project-local helper imported by infra.py (the advertised "modules"
-        # pattern) would stay cached, so its module-level resource registrations
-        # run only on the FIRST program() call per process. In an interactive
-        # apply (preview then up in one process) the up would then omit those
-        # resources, and Pulumi would destroy them as if removed from the
-        # program. Fresh-loading the whole user program every call matches the
-        # documented preview/up semantics. Both the lexical and the resolved
-        # __file__ are checked so a symlinked helper file is caught from
-        # either direction.
+        # (excluding keep_roots: .tlumi/ and the interpreter's own prefixes,
+        # whose site-packages hold SDKs that must stay cached). Popping only
+        # the entry module is not enough: any project-local helper imported by
+        # infra.py (the advertised "modules" pattern) would stay cached, so
+        # its module-level resource registrations run only on the FIRST
+        # program() call per process. In an interactive apply (preview then up
+        # in one process) the up would then omit those resources, and Pulumi
+        # would destroy them as if removed from the program. Fresh-loading the
+        # whole user program every call matches the documented preview/up
+        # semantics. Both the lexical and the resolved __file__ are checked so
+        # a symlinked helper file is caught from either direction.
         for name, mod in list(sys.modules.items()):
             origin = getattr(mod, "__file__", None)
             if not origin:
@@ -399,12 +408,14 @@ def _load_inline_program(config: ProjectConfig) -> Callable[[], None]:
             try:
                 lexical = Path(origin)
                 resolved = lexical.resolve()
-            except (OSError, ValueError, TypeError):
-                # Pathological __file__ (non-str, embedded NUL, unresolvable):
-                # skip this module instead of aborting the whole run.
+            except (OSError, RuntimeError, ValueError, TypeError):
+                # Pathological __file__ (non-str, embedded NUL, unresolvable,
+                # or a symlink loop, which makes Python 3.10's resolve()
+                # raise RuntimeError): skip this module instead of aborting
+                # the whole run.
                 continue
             for candidate in (lexical, resolved):
-                if _under_any(candidate, user_roots) and not _under_any(candidate, tlumi_roots):
+                if _under_any(candidate, user_roots) and not _under_any(candidate, keep_roots):
                     del sys.modules[name]
                     break
 
@@ -479,8 +490,10 @@ def _read_managed_keys(config: ProjectConfig) -> set[str] | None:
 
     Returns None when the sidecar is missing, unreadable, or malformed;
     callers must then skip stale-key removal entirely. Failing to clean a
-    stale variable is safe (the next successful run reconciles); deleting
-    config tlumi does not own is not.
+    stale variable is safe but not self-healing: a key whose variable is
+    removed from tlumi.yaml while no sidecar exists is never recorded again,
+    so it stays in Pulumi config until removed manually. Deleting config
+    tlumi does not own is worse, so no sidecar still means no removal.
     """
     path = _managed_keys_path(config)
     if path.is_symlink():
@@ -490,12 +503,16 @@ def _read_managed_keys(config: ProjectConfig) -> set[str] | None:
         raw = path.read_text()
     except FileNotFoundError:
         return None
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # UnicodeDecodeError: byte-level corruption is malformed content too;
+        # skip cleanup instead of crashing every runtime command.
         _log.debug("Cannot read managed-config sidecar %s", path, exc_info=True)
         return None
     try:
         keys = json.loads(raw)["keys"]
-    except (ValueError, TypeError, KeyError):
+    except (ValueError, TypeError, KeyError, RecursionError):
+        # RecursionError: a pathologically nested JSON file (e.g. an
+        # attacker-shipped .tlumi/) is treated like any other corrupt sidecar.
         _log.debug("Malformed managed-config sidecar %s", path, exc_info=True)
         return None
     if not isinstance(keys, list) or not all(isinstance(k, str) for k in keys):
@@ -507,8 +524,11 @@ def _read_managed_keys(config: ProjectConfig) -> set[str] | None:
 def _write_managed_keys(config: ProjectConfig, keys: set[str]) -> None:
     """Record the config keys tlumi wrote, for the next run's cleanup.
 
-    Best-effort: a write failure only means the next run skips stale-key
-    cleanup (the safe direction), so warn instead of failing the command.
+    Best-effort: a write failure means stale-key cleanup stays skipped until
+    a later run rewrites the sidecar (the safe direction), so warn instead
+    of failing the command. It is not a one-run skip: a variable removed
+    from tlumi.yaml while no sidecar exists is never recorded again, so its
+    config key is never cleaned automatically. The warning says so.
     """
     path = _managed_keys_path(config)
     payload = json.dumps({"keys": sorted(keys)}) + "\n"
@@ -517,23 +537,34 @@ def _write_managed_keys(config: ProjectConfig, keys: set[str]) -> None:
     except OSError:
         _log.warning(
             "Could not record managed config keys at %s;"
-            " stale variable cleanup will be skipped on the next run.",
+            " stale variable cleanup is skipped until a later run rewrites"
+            " this file. A variable removed from tlumi.yaml in the meantime"
+            " is never cleaned up automatically.",
             path,
         )
         _log.debug("Managed-config sidecar write failure", exc_info=True)
 
 
 def safe_export_stack(stack: auto.Stack) -> auto.Deployment:
-    """Export stack state, wrapping CommandError in WorkspaceError."""
+    """Export stack state, wrapping CommandError in WorkspaceError.
+
+    The redacted Pulumi stderr is included in the message (matching the
+    CommandError-interpolation pattern used elsewhere) so the real cause is
+    visible on the default masked paths: e.g. a wrong TLUMI_SECRETS_PASSPHRASE
+    surfaces as "incorrect passphrase" with a passphrase hint instead of a
+    misleading state-unlock hint.
+    """
     from pulumi.automation import CommandError
 
     try:
         return stack.export_stack()
     except CommandError as e:
-        raise WorkspaceError(
-            "Failed to read state.",
-            hint="Run 'tlumi state unlock' if the state is locked.",
-        ) from e
+        detail = redact_text(str(e))
+        if "incorrect passphrase" in detail.lower():
+            hint = "Check TLUMI_SECRETS_PASSPHRASE is set correctly."
+        else:
+            hint = "Run 'tlumi state unlock' if the state is locked."
+        raise WorkspaceError(f"Failed to read state: {detail}", hint=hint) from e
 
 
 def get_stack(

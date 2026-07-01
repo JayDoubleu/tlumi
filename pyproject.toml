@@ -35,6 +35,9 @@ dependencies = [
     # (make_metavar signature change). 0.16.0 is the first release compatible with
     # both old and new click.
     "typer>=0.16.0",
+    # cli.py imports click directly (feature detection for suggestion handling);
+    # 8.0 is typer 0.16's own minimum.
+    "click>=8.0",
     "rich>=13.0.0",
     "pulumi>=3.242.0",
     # pyyaml 6.0/6.0.0 fail to build from source on Python 3.12+ (Cython 3
