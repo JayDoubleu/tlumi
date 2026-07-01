@@ -1,0 +1,45 @@
+name: Bug report
+description: Something is broken or behaves differently than documented.
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: tlumi version
+      description: Output of `tlumi version`.
+      placeholder: tlumi 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      placeholder: "3.13.2"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: Ubuntu 24.04 / macOS 15
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you run, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: tlumi.yaml
+      description: Paste your tlumi.yaml with any sensitive values redacted.
+      render: yaml
+  - type: textarea
+    id: output
+    attributes:
+      label: Verbose output
+      description: Re-run the failing command with `--verbose` and paste the output. Redact anything sensitive.
+      render: shell

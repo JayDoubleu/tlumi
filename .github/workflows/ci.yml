@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# Third-party actions are pinned to full commit SHAs (the trailing comment is
+# the tag the SHA was resolved from). Mutable tags can be repointed by a
+# compromised action repo; SHAs cannot. Update via Dependabot.
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          python-version: "3.13"
+      - name: Sync dev dependencies
+        run: uv sync --locked --dev
+      - name: Ruff lint
+        run: uv run ruff check src/ tests/ examples/
+      - name: Ruff format check
+        run: uv run ruff format --check src/ tests/
+      - name: Mypy
+        run: uv run mypy
+      - name: Bandit security scan
+        run: uv run bandit -r src/ -q
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        experimental: [false]
+        include:
+          - os: macos-latest
+            python-version: "3.13"
+            experimental: false
+          # Promote 3.14 to the regular matrix (and add the trove classifier
+          # in pyproject.toml) once this lane is green.
+          - os: ubuntu-latest
+            python-version: "3.14"
+            experimental: true
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Sync dev dependencies
+        run: uv sync --locked --dev
+      - name: Run tests
+        run: uv run python -m pytest tests/ -q
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          python-version: "3.13"
+      - name: Build sdist and wheel
+        run: uv build
+      - name: Check distribution metadata
+        run: uvx twine check dist/*
+      - name: Verify sdist contains no internal files
+        run: |
+          LEAKS=$(tar -tzf dist/*.tar.gz | grep -E 'todo_continue|\.claude|docs/internal|\.scenarios' || true)
+          if [ -n "$LEAKS" ]; then
+            echo "Internal files leaked into the sdist:" >&2
+            echo "$LEAKS" >&2
+            exit 1
+          fi
+      - name: Smoke-test wheel install
+        run: |
+          uv venv /tmp/smoke-venv
+          VIRTUAL_ENV=/tmp/smoke-venv uv pip install dist/*.whl
+          /tmp/smoke-venv/bin/tlumi version
+          /tmp/smoke-venv/bin/tlumi --help > /dev/null
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dist
+          path: dist/

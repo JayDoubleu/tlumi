@@ -1,0 +1,14 @@
+# AWS S3 bucket example
+#
+# Demonstrates a simple S3 bucket deployment with tags and versioning.
+
+project:
+  name: aws-s3-example
+  entry: infra.py
+
+secrets:
+  allow_unencrypted: true
+
+variables:
+  environment: dev
+  region: us-east-1

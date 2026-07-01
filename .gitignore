@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+
+# Tool caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# tlumi runtime
+.tlumi/
+Pulumi.yaml
+Pulumi.*.yaml
+
+# IDE
+.vscode/
+.idea/
+
+# Local Claude Code settings (machine-specific, never publish)
+.claude/settings.local.json
+
+# Scenario test outputs
+.scenarios/
+
+# Test coverage artifacts
+.coverage
+
+# Maintainer-local artifacts, never published: review/resume bundles, internal
+# docs (launch checklist, attack reviews, scenario notes), session scratchpads.
+todo_continue/
+docs/internal/
+.claude/TODO.md
+
+# OS
+.DS_Store

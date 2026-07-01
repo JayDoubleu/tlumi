@@ -1,0 +1,105 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tlumi"
+version = "0.1.0"
+description = "Terraform-like workflow for Python infrastructure-as-code, powered by Pulumi"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [
+    { name = "Jay W", email = "git.jaydoubleu@gmail.com" },
+]
+keywords = ["infrastructure", "iac", "pulumi", "terraform", "devops"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Systems Administration",
+    "Typing :: Typed",
+]
+dependencies = [
+    # typer < 0.16 produces a non-functional CLI: 0.12.x cannot parse the PEP 604
+    # "str | None" option annotations, and 0.13-0.15.3 break against click >= 8.2
+    # (make_metavar signature change). 0.16.0 is the first release compatible with
+    # both old and new click.
+    "typer>=0.16.0",
+    "rich>=13.0.0",
+    "pulumi>=3.242.0",
+    # pyyaml 6.0/6.0.0 fail to build from source on Python 3.12+ (Cython 3
+    # incompatibility); 6.0.1 is the first floor installable everywhere we
+    # claim support.
+    "pyyaml>=6.0.1",
+    "jinja2>=3.1.0",
+    "packaging>=21.0",
+]
+
+[project.scripts]
+tlumi = "tlumi.cli:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-mock>=3.14",
+    "mypy>=1.14",
+    "types-pyyaml>=6.0",
+    "ruff>=0.8.0",
+    "bandit>=1.8.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/jaydoubleu/tlumi"
+Repository = "https://github.com/jaydoubleu/tlumi"
+Issues = "https://github.com/jaydoubleu/tlumi/issues"
+Changelog = "https://github.com/jaydoubleu/tlumi/blob/main/CHANGELOG.md"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tlumi"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+    ".claude",
+    "docs",
+    ".scenarios",
+    "todo_continue",
+]
+# File patterns are anchored with a leading slash: hatchling patterns are
+# gitignore-style, so a bare "README.md" would also match README.md files in
+# ANY subdirectory (this once pulled an internal todo_continue/README.md into
+# the published sdist). Keep new entries anchored.
+include = [
+    "/src/tlumi",
+    "/tests",
+    "/examples",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/CONTRIBUTING.md",
+    "/SECURITY.md",
+    "/DESIGN.md",
+]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["src/tlumi"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]

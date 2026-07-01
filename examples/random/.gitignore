@@ -1,0 +1,6 @@
+# tlumi internal files
+.tlumi/
+
+# Pulumi auto-generated files
+Pulumi.yaml
+Pulumi.*.yaml
