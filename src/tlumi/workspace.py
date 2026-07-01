@@ -665,7 +665,7 @@ def get_stack(
     if passphrase:
         env_vars["PULUMI_CONFIG_PASSPHRASE"] = passphrase
     elif config.secrets.allow_unencrypted:
-        env_vars["PULUMI_CONFIG_PASSPHRASE"] = ""
+        env_vars["PULUMI_CONFIG_PASSPHRASE"] = ""  # nosec B105 - explicit empty opt-in
         if not _passphrase_warned and not quiet and config.secrets.warn_unencrypted:
             _passphrase_warned = True
             _log.info("Secrets are not encrypted (no TLUMI_SECRETS_PASSPHRASE set).")

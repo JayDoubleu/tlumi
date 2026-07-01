@@ -36,7 +36,7 @@ _log = logging.getLogger(__name__)
 # contain secrets: preview scrubs secret output values to the identical
 # wrapper on both the old and new side, so a changed secret export value is
 # invisible to the outputs comparison (see stack_outputs_changed).
-SECRET_OUTPUTS_BLIND_HINT = (
+SECRET_OUTPUTS_BLIND_HINT = (  # nosec B105 - user-facing hint text, not a credential
     "Note: secret output values cannot be compared in preview."
     " If a secret export changed, apply it with 'tlumi apply --auto-approve'."
 )
