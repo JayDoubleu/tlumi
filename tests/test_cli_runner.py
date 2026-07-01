@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import inspect
 import json
+import re
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -15,6 +16,18 @@ from typer.testing import CliRunner
 from tlumi.cli import app
 
 runner = CliRunner()
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _plain(text: str) -> str:
+    """Strip ANSI SGR sequences from CLI output.
+
+    On GitHub Actions rich detects the CI environment and emits styled
+    output even through CliRunner, splitting literals like "--var" with
+    escape codes; assertions must run on the plain text.
+    """
+    return _ANSI_RE.sub("", text)
 
 
 @pytest.fixture(autouse=True)
@@ -38,41 +51,41 @@ def test_windows_is_rejected_with_clear_message():
     with patch("tlumi.cli.sys.platform", "win32"):
         result = runner.invoke(app, ["version"])
     assert result.exit_code == 1
-    assert "does not support Windows" in result.output
-    assert "WSL2" in result.output
+    assert "does not support Windows" in _plain(result.output)
+    assert "WSL2" in _plain(result.output)
 
 
 def test_version_flag():
     """--version prints version and exits 0."""
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
-    assert "tlumi" in result.output
+    assert "tlumi" in _plain(result.output)
 
 
 def test_version_command():
     """'version' subcommand prints version."""
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
-    assert "tlumi" in result.output
+    assert "tlumi" in _plain(result.output)
 
 
 def test_help():
     """--help lists available commands."""
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    assert "plan" in result.output
-    assert "apply" in result.output
-    assert "destroy" in result.output
+    assert "plan" in _plain(result.output)
+    assert "apply" in _plain(result.output)
+    assert "destroy" in _plain(result.output)
 
 
 def test_plan_help():
     """plan --help shows plan-specific options."""
     result = runner.invoke(app, ["plan", "--help"])
     assert result.exit_code == 0
-    assert "--var" in result.output
-    assert "--target" in result.output
-    assert "--replace" in result.output
-    assert "--json" in result.output
+    assert "--var" in _plain(result.output)
+    assert "--target" in _plain(result.output)
+    assert "--replace" in _plain(result.output)
+    assert "--json" in _plain(result.output)
 
 
 @patch("tlumi.cli._do_plan")
@@ -516,14 +529,14 @@ def test_unknown_command_suggestion_shown_exactly_once():
     """
     result = runner.invoke(app, ["plann"])
     assert result.exit_code == 2
-    assert result.output.count("Did you mean") == _expected_suggestion_count()
+    assert _plain(result.output).count("Did you mean") == _expected_suggestion_count()
 
 
 def test_unknown_subcommand_suggestion_shown_exactly_once():
     """A typo'd subcommand (state lst) also shows exactly one suggestion."""
     result = runner.invoke(app, ["state", "lst"])
     assert result.exit_code == 2
-    assert result.output.count("Did you mean") == _expected_suggestion_count()
+    assert _plain(result.output).count("Did you mean") == _expected_suggestion_count()
 
 
 # ---------------------------------------------------------------------------
@@ -535,7 +548,7 @@ def test_clean_help_says_state_is_kept():
     """clean --help describes the default (caches only, state kept)."""
     result = runner.invoke(app, ["clean", "--help"])
     assert result.exit_code == 0
-    normalized = " ".join(result.output.split())
+    normalized = " ".join(_plain(result.output).split())
     assert "state and backups are kept" in normalized
     # The old, wrong claim that state is removed by default must not return.
     assert "(venv, state, caches)" not in normalized
