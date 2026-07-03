@@ -176,9 +176,7 @@ def test_get_stack_keeps_unmanaged_provider_config(tmp_path, monkeypatch):
     """A provider key tlumi never wrote (absent from the sidecar) is left alone."""
     config = _make_project(tmp_path, yaml_extra="secrets:\n  allow_unencrypted: true\n")
     cache = tmp_path / ".tlumi" / "cache"
-    (cache / "managed_config_keys.json").write_text(
-        json.dumps({"keys": [], "provider_keys": []})
-    )
+    (cache / "managed_config_keys.json").write_text(json.dumps({"keys": [], "provider_keys": []}))
     monkeypatch.delenv("TLUMI_SECRETS_PASSPHRASE", raising=False)
 
     mock_stack = MagicMock(spec=Stack)
