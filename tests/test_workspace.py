@@ -557,6 +557,32 @@ def test_mask_backend_url_oauth_refresh_token():
     assert "grant_type=refresh" in result
 
 
+def test_mask_backend_url_aws_signature_query():
+    """X-Amz-Signature (the replayable credential of a presigned S3 URL) is masked."""
+    url = "https://b.s3.amazonaws.com/k?X-Amz-Credential=cred&X-Amz-Signature=deadbeef&region=us"
+    result = _mask_backend_url(url)
+    assert "deadbeef" not in result
+    assert "region=us" in result
+
+
+def test_mask_backend_url_gcs_signature_query():
+    """X-Goog-Signature (presigned GCS URL signature) is masked."""
+    url = "https://storage.googleapis.com/b/o?X-Goog-Signature=abc123secretsig&region=us"
+    result = _mask_backend_url(url)
+    assert "abc123secretsig" not in result
+    assert "region=us" in result
+
+
+def test_mask_backend_url_netloc_only_preserves_query_encoding():
+    """When only the netloc is masked, a non-sensitive query keeps its percent-encoding
+    verbatim (no parse_qsl round-trip that would decode %26/%3D or '+')."""
+    url = "s3://user:pass@host/bucket?prefix=a%26b&x=1%3D2"
+    result = _mask_backend_url(url)
+    assert "user:***@host" in result
+    assert "prefix=a%26b" in result
+    assert "x=1%3D2" in result
+
+
 # ---------------------------------------------------------------------------
 # _load_inline_program: subdirectory sys.path
 # ---------------------------------------------------------------------------
@@ -815,6 +841,39 @@ def test_get_stack_stale_keys_removed(tmp_path, monkeypatch):
     # old_key should be removed (bare key passed to remove_config),
     # aws:region should not (different namespace)
     mock_stack.remove_config.assert_called_once_with("old_key")
+
+
+def test_get_stack_reconcile_config_false_preserves_plan_time_config(tmp_path, monkeypatch):
+    """reconcile_config=False (apply --plan) never touches stack config.
+
+    A plan run recorded 'foo' in the sidecar and set foo=bar on the stack. The
+    subsequent apply --plan run's merged variables no longer include 'foo' (the
+    command forbids re-supplying --var/--var-file/TLUMI_VAR_*). With the default
+    reconciliation this would remove_config('foo') before up(plan=...), and
+    Pulumi saved plans do not re-inject config, so config.require('foo') would
+    fail. reconcile_config=False must skip both cleanup and set so the plan-time
+    config survives into the apply.
+    """
+    config = _make_project(tmp_path, yaml_extra="secrets:\n  allow_unencrypted: true\n")
+    _write_sidecar(tmp_path, ["foo"])
+    monkeypatch.delenv("TLUMI_SECRETS_PASSPHRASE", raising=False)
+
+    from tlumi.workspace import get_stack
+
+    mock_stack = MagicMock(spec=Stack)
+    mock_stack.get_all_config.return_value = {"myproj:foo": MagicMock()}
+
+    with (
+        patch("tlumi.workspace._ensure_pulumi_cli"),
+        patch("tlumi.workspace._load_inline_program", return_value=lambda: None),
+        patch("tlumi.workspace.auto.create_or_select_stack", return_value=mock_stack),
+    ):
+        get_stack(config, reconcile_config=False)
+
+    # No config reconciliation: plan-time 'foo' must not be removed, and no
+    # variables are re-set (the plan already captured them).
+    mock_stack.remove_config.assert_not_called()
+    mock_stack.set_config.assert_not_called()
 
 
 def test_get_stack_stale_keys_skips_provider_namespace_collision(tmp_path, monkeypatch):
@@ -1796,3 +1855,82 @@ def test_make_shared_cache_dir_outside_home(tmp_path, monkeypatch):
     dest = tmp_path / "elsewhere" / "cache"
     _make_shared_cache_dir(dest)
     assert dest.is_dir()
+
+
+# ---------------------------------------------------------------------------
+# Hostile-repo hardening: symlink loops, symlinked .gitignore, deep-nested state
+# ---------------------------------------------------------------------------
+
+
+def test_gitignore_symlink_is_skipped(tmp_path, caplog, monkeypatch):
+    """A symlinked .gitignore is skipped, never read.
+
+    A repo-committed .gitignore -> /dev/zero (unbounded read that decodes as
+    valid UTF-8) or -> /dev/stdin (blocks forever) would otherwise OOM or hang
+    every non-quiet get_stack() before any user code runs.
+    """
+    from pathlib import Path
+
+    import tlumi.workspace
+
+    monkeypatch.setattr(tlumi.workspace, "_gitignore_warned", False)
+    config = _make_project(tmp_path)
+    target = tmp_path / "gitignore_target"
+    target.write_text("__pycache__/\n")
+    (tmp_path / ".gitignore").symlink_to(target)
+
+    def boom(self, *a, **k):
+        raise AssertionError(f"read_text must not be called on {self}")
+
+    monkeypatch.setattr(Path, "read_text", boom)
+
+    with caplog.at_level("DEBUG", logger="tlumi.workspace"):
+        _check_gitignore(config)  # must not raise or read the symlink
+    assert "symlink" in caplog.text.lower()
+
+
+def test_get_stack_tlumi_symlink_loop_clean_error(tmp_path, monkeypatch):
+    """A symlink-loop .tlumi yields a clean WorkspaceError, not a raw
+    RuntimeError from Path.resolve() (Python 3.10-3.12 raise on loops)."""
+    from pathlib import Path
+
+    from tlumi.errors import WorkspaceError
+    from tlumi.workspace import get_stack
+
+    (tmp_path / "tlumi.yaml").write_text(
+        "project:\n  name: myproj\n  entry: infra.py\nsecrets:\n  allow_unencrypted: true\n"
+    )
+    (tmp_path / "infra.py").write_text("pass\n")
+    config = load_config(tmp_path)
+    monkeypatch.delenv("TLUMI_SECRETS_PASSPHRASE", raising=False)
+
+    tlumi_dir = config.tlumi_dir
+    tlumi_dir.symlink_to(tlumi_dir)  # self-referential loop
+
+    orig_resolve = Path.resolve
+
+    def fake_resolve(self, *a, **k):
+        if self.is_symlink():
+            raise RuntimeError(f"Symlink loop from {self}")
+        return orig_resolve(self, *a, **k)
+
+    monkeypatch.setattr(Path, "resolve", fake_resolve)
+
+    with pytest.raises(WorkspaceError, match=".tlumi is a symlink"):
+        get_stack(config)
+
+
+def test_safe_export_stack_deep_nesting_recursion_error():
+    """RecursionError from the SDK's internal json.loads of deeply nested
+    exported state surfaces as a clean WorkspaceError, not a raw traceback."""
+    from tlumi.errors import WorkspaceError as WSError
+    from tlumi.workspace import safe_export_stack
+
+    mock_stack = MagicMock(spec=Stack)
+    mock_stack.export_stack.side_effect = RecursionError("maximum recursion depth exceeded")
+
+    with pytest.raises(WSError) as excinfo:
+        safe_export_stack(mock_stack)
+
+    assert "Failed to read state:" in excinfo.value.message
+    assert "nesting" in excinfo.value.message.lower()

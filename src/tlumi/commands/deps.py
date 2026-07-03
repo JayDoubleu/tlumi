@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 
 from packaging.requirements import InvalidRequirement, Requirement
 
-from tlumi._safeio import safe_append_text
+from tlumi._safeio import safe_append_text, safe_write_text
 from tlumi.config import ProjectConfig, find_project_dir, load_config
 from tlumi.display import console, install_live, print_banner, print_success
 from tlumi.errors import WorkspaceError
@@ -35,6 +36,23 @@ def _normalize_name(spec: str) -> str:
                 hint="Provide a valid PEP 508 requirement, e.g. 'pulumi-aws' or 'pulumi-aws>=6.0'.",
             )
         return name
+
+
+def _has_version_constraint(spec: str) -> bool:
+    """True if the spec pins a version (has a specifier or a direct URL).
+
+    A bare package name carries no constraint, so re-adding one must NOT
+    overwrite an existing pinned line: doing so would silently strip a
+    user-authored version pin (and any inline comment) and the unpinned install
+    would then upgrade the venv off the pin. Only a spec that actually pins a
+    version replaces the stored line.
+    """
+    try:
+        req = Requirement(spec)
+        return bool(req.specifier or req.url)
+    except InvalidRequirement:
+        # Fallback: any comparison operator or a direct '@ url' means a pin.
+        return bool(re.search(r"[~!=<>]", spec)) or "@" in spec
 
 
 def _ensure_venv(config: ProjectConfig) -> None:
@@ -79,28 +97,56 @@ def run_deps_add(packages: list[str]) -> None:
     req_path = config.project_dir / "requirements.txt"
     if req_path.is_symlink():
         raise WorkspaceError(
-            f"requirements.txt is a symlink to {req_path.resolve()}",
+            f"requirements.txt is a symlink to {os.readlink(req_path)}",
             hint="Remove the symlink before adding packages.",
         )
     try:
-        existing_lines = req_path.read_text().splitlines() if req_path.exists() else []
+        existing_content = req_path.read_text() if req_path.exists() else ""
     except (OSError, UnicodeDecodeError) as e:
         raise WorkspaceError(f"Cannot read requirements.txt: {e}") from e
-    existing_packages = {
-        _normalize_name(line)
-        for line in existing_lines
-        if line.strip() and not line.startswith("#") and not line.startswith("-")
-    }
+    existing_lines = existing_content.splitlines()
 
-    new_entries = []
+    # Map each already-listed package (by normalized name) to its line index so a
+    # re-add with a NEW version spec updates the pin in place instead of being
+    # silently dropped. The install below always runs with the given spec, so a
+    # dropped write would leave the venv upgraded while requirements.txt kept the
+    # old pin, and the next 'deps install' / fresh clone would revert it.
+    existing_index: dict[str, int] = {}
+    for i, line in enumerate(existing_lines):
+        if line.strip() and not line.startswith("#") and not line.startswith("-"):
+            existing_index[_normalize_name(line)] = i
+
+    lines = list(existing_lines)
+    new_entries: list[str] = []
+    updated_existing = False
     for pkg in packages:
-        pkg_name = _normalize_name(pkg)
-        if pkg_name not in existing_packages:
+        idx = existing_index.get(_normalize_name(pkg))
+        if idx is None:
             new_entries.append(pkg)
+        elif lines[idx] != pkg and _has_version_constraint(pkg):
+            # Only a spec that pins a version replaces the stored line. A bare
+            # name (or any spec without a constraint) leaves the existing pin and
+            # inline comment intact instead of clobbering them.
+            lines[idx] = pkg
+            updated_existing = True
 
-    if new_entries:
+    if updated_existing:
+        # A pinned spec changed; append cannot edit an existing line, so rewrite
+        # the whole file. This also repairs a missing trailing newline for free.
+        content = "\n".join(lines + new_entries)
+        if content:
+            content += "\n"
         try:
-            safe_append_text(req_path, "".join(f"{entry}\n" for entry in new_entries))
+            safe_write_text(req_path, content)
+        except OSError as e:
+            raise WorkspaceError(f"Failed to write requirements.txt: {e}") from e
+    elif new_entries:
+        # Append-only path. Prepend a newline when the existing file lacks a
+        # trailing one, so the first new entry does not merge into the last line
+        # (mirrors init.py's .gitignore handling).
+        prefix = "\n" if existing_content and not existing_content.endswith("\n") else ""
+        try:
+            safe_append_text(req_path, prefix + "".join(f"{entry}\n" for entry in new_entries))
         except OSError as e:
             raise WorkspaceError(f"Failed to write requirements.txt: {e}") from e
 

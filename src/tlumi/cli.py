@@ -15,6 +15,7 @@ from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
+from types import TracebackType
 from typing import Annotated, Any, NoReturn
 
 import click
@@ -70,14 +71,31 @@ _root_logger.addHandler(_ws_handler)
 _root_logger.setLevel(logging.DEBUG)
 
 
+def _exc_from_pulumi(tb: TracebackType | None) -> bool:
+    """True if any frame in the traceback originates in the pulumi package."""
+    marker = f"{os.sep}pulumi{os.sep}"
+    while tb is not None:
+        if marker in tb.tb_frame.f_code.co_filename:
+            return True
+        tb = tb.tb_next
+    return False
+
+
 def _quiet_threading_excepthook(args: threading.ExceptHookArgs) -> None:
-    if (
-        args.exc_type is ValueError
-        and "closed file" in str(args.exc_value)
-        and args.thread is not None
-        and "pulumi" in args.thread.name.lower()
-    ):
-        _log.debug("Suppressed threading error in %s: %s", args.thread.name, args.exc_value)
+    # The Pulumi Automation SDK creates its output-consumer and log-watcher
+    # threads unnamed, so they get default names like "Thread-7 (consumer)" and
+    # "Thread-9 (_watch_logs)", never containing "pulumi". Match those name
+    # forms (and the traceback origin, for robustness against SDK renames)
+    # rather than only a "pulumi" substring, which no real SDK thread carries.
+    thread_name = args.thread.name.lower() if args.thread is not None else ""
+    is_pulumi_thread = (
+        "pulumi" in thread_name
+        or "consumer" in thread_name
+        or "_watch_logs" in thread_name
+        or _exc_from_pulumi(args.exc_traceback)
+    )
+    if args.exc_type is ValueError and "closed file" in str(args.exc_value) and is_pulumi_thread:
+        _log.debug("Suppressed threading error in %s: %s", thread_name, args.exc_value)
         return
     _original_excepthook(args)
 
@@ -143,6 +161,12 @@ _TYPER_HAS_SUGGEST_COMMANDS = (
 )
 # click 8.3 added NoSuchCommand with native "Did you mean" suggestions.
 _CLICK_HAS_NATIVE_SUGGESTIONS = hasattr(click.exceptions, "NoSuchCommand")
+# typer >= 0.26 vendored click's command resolution as
+# TyperGroup._click_resolve_command, which raises a plain UsageError via
+# ctx.fail() instead of click's NoSuchCommand, so click's native suggestion
+# no longer fires even on click >= 8.3. There, typer's own suggestion is the
+# only remaining layer and must stay enabled.
+_TYPER_VENDORS_RESOLVE_COMMAND = hasattr(typer.core.TyperGroup, "_click_resolve_command")
 
 
 def _make_typer(**kwargs: Any) -> typer.Typer:
@@ -152,12 +176,18 @@ def _make_typer(**kwargs: Any) -> typer.Typer:
     UsageError, which already carries click's suggestion, so every unknown
     command printed a doubled message ("Did you mean 'state'? Did you mean
     'state'?"). Disable typer's copy only when click's native single
-    suggestion remains (click >= 8.3, detected via NoSuchCommand); on older
-    click, typer's suggestion is the only one, so it stays on. The parameter
-    does not exist below typer 0.20 (the dependency floor is 0.16), hence
-    the feature detection on both layers.
+    suggestion actually reaches the user: click >= 8.3 (detected via
+    NoSuchCommand) AND typer has not vendored its own command resolution
+    (typer < 0.26). On older click, or on typer >= 0.26 where click's native
+    suggestion is bypassed, typer's suggestion is the only one, so it stays
+    on. The parameter does not exist below typer 0.20 (the dependency floor is
+    0.16), hence the feature detection on all layers.
     """
-    if _TYPER_HAS_SUGGEST_COMMANDS and _CLICK_HAS_NATIVE_SUGGESTIONS:
+    if (
+        _TYPER_HAS_SUGGEST_COMMANDS
+        and _CLICK_HAS_NATIVE_SUGGESTIONS
+        and not _TYPER_VENDORS_RESOLVE_COMMAND
+    ):
         kwargs["suggest_commands"] = False
     return typer.Typer(**kwargs)
 
@@ -210,7 +240,14 @@ def _setup(ctx: typer.Context, verbose: bool = False, json: bool = False) -> Run
 
 def _version_callback(value: bool) -> None:
     if value:
-        typer.echo(f"tlumi {tlumi.__version__}")
+        try:
+            typer.echo(f"tlumi {tlumi.__version__}")
+        except BrokenPipeError:
+            # An early-closed stdout (`tlumi --version | head -0`) must exit 0
+            # quietly, matching the project-wide EPIPE convention in _run,
+            # instead of click's silent exit 1 that fails pipefail scripts.
+            _pacify_broken_stdout()
+            raise typer.Exit(0) from None
         raise typer.Exit()
 
 
@@ -542,7 +579,12 @@ def _do_fmt(check: bool = False) -> None:
 @app.command()
 def version() -> None:
     """Show version information."""
-    typer.echo(f"tlumi {tlumi.__version__}")
+    try:
+        typer.echo(f"tlumi {tlumi.__version__}")
+    except BrokenPipeError:
+        # See _version_callback: an early-closed stdout exits 0 quietly.
+        _pacify_broken_stdout()
+        raise typer.Exit(0) from None
 
 
 @app.command()
@@ -790,14 +832,19 @@ def _pacify_broken_stdout() -> None:
         pass
 
 
-def _report_failure(render: Callable[[], None], exit_code: int) -> NoReturn:
+def _report_failure(render: Callable[[], None], exit_code: int, pending: list[int]) -> NoReturn:
     """Render a failure/interrupt message, then exit with ``exit_code``.
 
-    If the reader closes the pipe before the message is fully written
-    (BrokenPipeError mid-render), the failure's exit code must survive:
-    a failed command piped to a truncating reader must not report success
-    via _run's exit-0 EPIPE path.
+    Records ``exit_code`` in ``pending`` BEFORE rendering so the failure code
+    survives even when the raised ``typer.Exit`` is later replaced by a
+    ``BrokenPipeError``. Two EPIPE windows exist: (1) mid-render, caught here
+    directly; (2) after a full report is delivered, when the window-teardown
+    write (Live restore or the trailing newline in ``_WindowContext.__exit__``)
+    EPIPEs and unwinds past this Exit into _run's outer handler. That handler
+    reads ``pending`` and re-raises the failure code instead of masking a
+    failed command as success (exit 0) under ``set -o pipefail``.
     """
+    pending[0] = exit_code
     try:
         render()
     except BrokenPipeError:
@@ -820,13 +867,18 @@ def _run(fn: Callable[[], None], run_ctx: RunContext, *, windowless: bool = Fals
     truncated output is the reader's choice, not a failure. The display
     consoles re-raise BrokenPipeError instead of Rich's SystemExit(1) (see
     ``_TlumiConsole``) so this handler engages for Rich output too. An EPIPE
-    that interrupts the *reporting* of a failure keeps the failure's exit
-    code (1/130) instead.
+    that interrupts the *reporting* of a failure (mid-render OR at window
+    teardown, after the full report was delivered) keeps the failure's exit
+    code (1/130) instead: ``_report_failure`` records it in ``pending`` and the
+    outer handler re-raises that code rather than 0.
     """
     ctx = nullcontext() if (run_ctx.json_output or windowless) else create_window()
     # Windowless commands (state pull, output --raw) keep stdout a clean data
     # channel; route their human error output to stderr too, not just notices.
     error_stream = err_console if windowless else None
+    # Failure/interrupt exit code, recorded by _report_failure before it renders.
+    # Stays 0 for a successful run so a truncated-output EPIPE still exits 0.
+    pending: list[int] = [0]
     try:
         with ctx:
             try:
@@ -836,7 +888,7 @@ def _run(fn: Callable[[], None], run_ctx: RunContext, *, windowless: bool = Fals
                 # so a lambda must close over a stable local name instead.
                 engine_err = e
                 if run_ctx.json_output:
-                    _report_failure(lambda: _emit_json_error(engine_err), 1)
+                    _report_failure(lambda: _emit_json_error(engine_err), 1, pending)
                 else:
                     # _handle_engine_error raises typer.Exit(1) itself; the
                     # wrapper only matters when EPIPE aborts it mid-render.
@@ -845,15 +897,17 @@ def _run(fn: Callable[[], None], run_ctx: RunContext, *, windowless: bool = Fals
                             engine_err, verbose=run_ctx.verbose, stream=error_stream
                         ),
                         1,
+                        pending,
                     )
             except TlumiError as e:
                 tlumi_err = e
                 if run_ctx.json_output:
-                    _report_failure(lambda: _emit_json_error(tlumi_err), 1)
+                    _report_failure(lambda: _emit_json_error(tlumi_err), 1, pending)
                 else:
                     _report_failure(
                         lambda: print_error(tlumi_err.message, tlumi_err.hint, stream=error_stream),
                         1,
+                        pending,
                     )
             except KeyboardInterrupt:
 
@@ -867,7 +921,7 @@ def _run(fn: Callable[[], None], run_ctx: RunContext, *, windowless: bool = Fals
                         out = error_stream if error_stream is not None else console
                         out.print("\n  [warning]Interrupted.[/warning]")
 
-                _report_failure(_render_interrupt, 130)
+                _report_failure(_render_interrupt, 130, pending)
             except Exception:
                 try:
                     console.show_cursor(True)
@@ -875,11 +929,13 @@ def _run(fn: Callable[[], None], run_ctx: RunContext, *, windowless: bool = Fals
                     pass
                 raise
     except BrokenPipeError:
-        # The reader closed stdout early (e.g. `tlumi show | head -5`). POSIX
-        # CLI convention: exit quietly instead of click's silent exit 1, which
-        # fails `set -e`/pipefail scripts with no error text at all.
+        # The reader closed stdout early. For a successful run (``tlumi show |
+        # head``) pending is 0: exit quietly instead of click's silent exit 1,
+        # which fails `set -e`/pipefail scripts with no error text at all. If a
+        # failure/interrupt report was in flight when the teardown write EPIPEd,
+        # pending holds its code (1/130) so the failure is not masked as success.
         _pacify_broken_stdout()
-        raise typer.Exit(0) from None
+        raise typer.Exit(pending[0]) from None
 
 
 def _emit_json_error(e: TlumiError) -> None:

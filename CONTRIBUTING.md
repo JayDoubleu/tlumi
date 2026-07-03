@@ -40,7 +40,7 @@ uv run mypy
 uv run bandit -r src/ -q
 ```
 
-CI runs the same checks (plus the test matrix on Python 3.10 to 3.13) on every PR; please run them locally first.
+CI runs the same checks (plus the test matrix on Python 3.10 to 3.14) on every PR; please run them locally first.
 
 ## Code conventions
 

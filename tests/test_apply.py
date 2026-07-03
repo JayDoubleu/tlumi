@@ -460,6 +460,47 @@ def test_apply_plan_file(mock_find, mock_config, mock_merge, mock_get_stack, tmp
     assert data["plan_file"] == str((tmp_path / "plan.json").resolve())
 
 
+@patch("tlumi.commands._common.get_stack")
+@patch("tlumi.commands._common.merge_variables")
+@patch("tlumi.commands._common.load_config")
+@patch("tlumi.commands._common.find_project_dir")
+def test_apply_plan_file_preserves_plan_time_config(
+    mock_find, mock_config, mock_merge, mock_get_stack, tmp_path, capsys
+):
+    """apply --plan calls get_stack with reconcile_config=False.
+
+    Without this, get_stack's stale-config cleanup removes plan-time variables
+    (recorded in the sidecar but absent from the now-narrower merged variables)
+    before up(plan=...), and Pulumi saved plans do not re-inject config, so
+    config.require() fails at apply time.
+    """
+    mock_stack = MagicMock(spec=Stack)
+    mock_stack.up.return_value = mock_up_result(resource_changes={"create": 1})
+    mock_get_stack.return_value = mock_stack
+
+    plan_path = str(tmp_path / "plan.json")
+    run_apply(auto_approve=True, plan_file=plan_path, json_output=True)
+
+    assert mock_get_stack.call_args.kwargs["reconcile_config"] is False
+
+
+@patch("tlumi.commands._common.get_stack")
+@patch("tlumi.commands._common.merge_variables")
+@patch("tlumi.commands._common.load_config")
+@patch("tlumi.commands._common.find_project_dir")
+def test_apply_without_plan_reconciles_config(
+    mock_find, mock_config, mock_merge, mock_get_stack, capsys
+):
+    """A normal apply (no --plan) still reconciles stack config."""
+    mock_stack = MagicMock(spec=Stack)
+    mock_stack.up.return_value = mock_up_result(resource_changes={"create": 1})
+    mock_get_stack.return_value = mock_stack
+
+    run_apply(auto_approve=True, json_output=True)
+
+    assert mock_get_stack.call_args.kwargs["reconcile_config"] is True
+
+
 def test_apply_plan_file_conflicts_with_var():
     """apply --plan with --var raises TlumiError."""
     from tlumi.errors import TlumiError

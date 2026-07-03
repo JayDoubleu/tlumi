@@ -9,6 +9,7 @@ download from GitHub releases.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import os
 import platform
 import shutil
@@ -90,7 +91,7 @@ def _verify_checksum(url: str, archive_path: Path, filename: str) -> None:
         with urllib.request.urlopen(checksum_url, timeout=10) as response:  # nosec B310
             checksum_data = response.read().decode().strip()
             expected = checksum_data.split()[0]
-    except OSError as e:
+    except (OSError, http.client.HTTPException) as e:
         archive_path.unlink(missing_ok=True)
         raise WorkspaceError(
             f"Failed to download checksum file for {filename}: {e}",
@@ -163,13 +164,17 @@ def _download_uv(dest_dir: Path) -> Path:
             f"Cannot create uv cache directory: {e}",
             hint="Check disk space and directory permissions.",
         ) from e
-    archive_path = dest_dir / filename
+    # Pid-unique archive path: two concurrent first-run downloads must not open
+    # the same file with "wb" and truncate each other's bytes (which would trip
+    # a false "may be corrupted or tampered with" checksum mismatch). Mirrors the
+    # pid-unique tmp_dest used for the extracted binary below (F13).
+    archive_path = dest_dir / f"{filename}.{os.getpid()}.tmp"
 
     try:
         with urllib.request.urlopen(url, timeout=60) as response:  # nosec B310
             with open(archive_path, "wb") as f:
                 shutil.copyfileobj(response, f)
-    except OSError as e:
+    except (OSError, http.client.HTTPException) as e:
         archive_path.unlink(missing_ok=True)
         raise WorkspaceError(
             f"Failed to download uv: {e}",

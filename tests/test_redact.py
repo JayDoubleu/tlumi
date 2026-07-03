@@ -64,6 +64,20 @@ def test_jwt_three_segments():
     assert REDACTED in out
 
 
+def test_jwt_large_payload_segment_masked():
+    # Azure AD / Entra access-token JWTs with group claims routinely carry a
+    # payload segment far beyond a couple thousand base64url chars. A bare token
+    # echoed in provider stderr (no Bearer/key= framing) must still be masked;
+    # _JWT must not silently give up on long segments.
+    header = "eyJhbGciOiJIUzI1NiJ9"
+    payload = "A" * 3000
+    sig = "SflKxwRJSMeKKF2QT4f"
+    jwt = f"{header}.{payload}.{sig}"
+    out = redact_text(f"provider error: {jwt} failed")
+    assert jwt not in out
+    assert REDACTED in out
+
+
 def test_short_dotted_identifier_not_treated_as_jwt():
     # 'foo.bar.baz' with each segment < 8 chars should not be redacted
     out = redact_text("Method foo.bar.baz returned 200.")
@@ -199,3 +213,60 @@ def test_redact_no_redos_on_colon_heavy_input():
     start = time.monotonic()
     redact_text(big)
     assert time.monotonic() - start < 1.0, "redact_text should be linear, not O(n^2)"
+
+
+def test_redact_no_redos_on_hyphen_alternating_input():
+    """_JWT must be bounded: hyphen-alternating text creates a \\b boundary at every
+    transition, and an unbounded {8,} quantifier backtracks O(n^2)."""
+    import time
+
+    big = "s3://" + "a-" * 50000  # hyphen every char: \b at each, no '.', no match
+    start = time.monotonic()
+    redact_text(big)
+    assert time.monotonic() - start < 1.0, "redact_text _JWT should be linear, not O(n^2)"
+
+
+def test_redact_no_redos_on_repeated_begin_markers():
+    """_GCP_PRIVATE_KEY must be bounded: repeated BEGIN markers with no END make the
+    lazy '.*?' expand to end-of-string at each marker, giving O(n^2)."""
+    import time
+
+    big = "-----BEGIN PRIVATE KEY----- " * 8000  # repeated BEGIN, never an END
+    start = time.monotonic()
+    redact_text(big)
+    assert time.monotonic() - start < 1.0, "redact_text _GCP_PRIVATE_KEY should be linear"
+
+
+def test_url_userinfo_masks_bare_token():
+    """A bare token in the userinfo (scheme://TOKEN@host, no colon) is masked, matching
+    _mask_backend_url which classifies lone userinfo as a credential."""
+    out = redact_text(
+        "error open bucket s3://GHSAT0AAAABBBBCCCCDDDD@minio.internal:9000/tlumi-state: 403"
+    )
+    assert "GHSAT0AAAABBBBCCCCDDDD" not in out
+    assert "s3://***@minio.internal:9000/tlumi-state" in out
+
+
+def test_url_userinfo_bare_token_does_not_mask_plain_url_with_at_in_path():
+    """A URL with no userinfo '@' (the '@' is elsewhere, gated by '/') is untouched."""
+    text = "fetched https://example.com/u/a@b from upstream"
+    assert redact_text(text) == text
+
+
+def test_aws_presigned_signature_masked():
+    """X-Amz-Signature (the replayable credential of a presigned S3 URL) is masked."""
+    out = redact_text(
+        "403 https://b.s3.amazonaws.com/k?X-Amz-Credential=cred&X-Amz-Signature=deadbeefcafe1234&x=1"
+    )
+    assert "deadbeefcafe1234" not in out
+    assert "X-Amz-Signature=***" in out
+    assert "x=1" in out
+
+
+def test_gcs_presigned_signature_masked():
+    """X-Goog-Signature (presigned GCS URL signature) is masked."""
+    out = redact_text(
+        "error https://storage.googleapis.com/b/o?X-Goog-Signature=abc123secretsig&x=1"
+    )
+    assert "abc123secretsig" not in out
+    assert "X-Goog-Signature=***" in out

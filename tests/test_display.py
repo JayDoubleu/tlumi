@@ -26,6 +26,7 @@ from tlumi.display import (
     print_json,
     print_outputs,
     print_plan_summary,
+    prompt,
 )
 
 
@@ -99,6 +100,27 @@ def test_confirm_case_insensitive(mock_console):
 def test_confirm_rejects_empty(mock_console):
     mock_console.input.return_value = ""
     assert confirm("Proceed?") is False
+
+
+@patch("tlumi.display.console")
+def test_confirm_disables_emoji_shortcodes(mock_console):
+    """confirm() must render its prompt with emoji=False.
+
+    Console.input hard-defaults emoji=True, which would rewrite :shortcode:
+    sequences in a resource name (e.g. 'cache:wave:node') to an emoji in a
+    destructive confirmation, bypassing the console-level emoji=False invariant.
+    """
+    mock_console.input.return_value = "yes"
+    confirm("Remove aws:s3:Bucket (cache:wave:node) from state?")
+    assert mock_console.input.call_args.kwargs.get("emoji") is False
+
+
+@patch("tlumi.display.console")
+def test_prompt_disables_emoji_shortcodes(mock_console):
+    """prompt() must render its prompt with emoji=False (same invariant as confirm())."""
+    mock_console.input.return_value = "answer"
+    prompt("Enter :wave: value:")
+    assert mock_console.input.call_args.kwargs.get("emoji") is False
 
 
 # ---------------------------------------------------------------------------
@@ -380,7 +402,7 @@ def test_confirm_pauses_and_resumes_window(mock_console):
     mock_window.pause.side_effect = lambda: call_order.append("pause")
     mock_window.resume.side_effect = lambda: call_order.append("resume")
 
-    def fake_input(prompt):
+    def fake_input(prompt, **kwargs):
         call_order.append("input")
         return "yes"
 

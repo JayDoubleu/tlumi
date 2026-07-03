@@ -1936,6 +1936,24 @@ def test_stack_outputs_changed_false_when_outputs_equal():
     assert handler.stack_outputs_changed is False
 
 
+def test_stack_outputs_changed_detects_bool_to_int():
+    """True -> 1 is a real output-only change; cross-type == must not hide it."""
+    from helpers import stack_outputs_event
+
+    handler = EventHandler(quiet=True)
+    handler.on_preview(stack_outputs_event({"flag": True}, {"flag": 1}))
+    assert handler.stack_outputs_changed is True
+
+
+def test_stack_outputs_changed_detects_int_to_float():
+    """1 -> 1.0 serializes differently but compares equal cross-type; still a change."""
+    from helpers import stack_outputs_event
+
+    handler = EventHandler(quiet=True)
+    handler.on_preview(stack_outputs_event({"n": 1}, {"n": 1.0}))
+    assert handler.stack_outputs_changed is True
+
+
 def test_stack_outputs_changed_sticky_across_events():
     """The flag latches: a later equal-outputs Stack event must not clear it."""
     from helpers import stack_outputs_event

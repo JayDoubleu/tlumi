@@ -100,6 +100,9 @@ def run_apply(
         json_output=json_output,
         banner="Applying changes...",
         status_msg="Analyzing infrastructure...",
+        # A saved plan carries the config it was generated against; reconciling
+        # would remove those plan-time variables before up(plan=...). Preserve them.
+        reconcile_config=not plan_file,
     )
     stack = result_obj.stack
     resolved_targets = result_obj.resolved_targets

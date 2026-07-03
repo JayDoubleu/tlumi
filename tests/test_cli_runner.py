@@ -539,6 +539,39 @@ def test_unknown_subcommand_suggestion_shown_exactly_once():
     assert _plain(result.output).count("Did you mean") == _expected_suggestion_count()
 
 
+def test_make_typer_keeps_typer_suggestion_when_resolve_vendored(monkeypatch):
+    """typer >= 0.26 vendored resolve_command, bypassing click's native suggestion.
+
+    There, tlumi must NOT pass suggest_commands=False (typer's own suggestion is
+    the only remaining layer). Below 0.26, click's native suggestion fires, so
+    typer's duplicate must stay disabled. The repo's locked typer (0.25.x) cannot
+    manifest the 0.26 runtime behavior, so this exercises _make_typer's decision
+    by simulating the detection flags.
+    """
+    import tlumi.cli as cli_mod
+
+    captured: dict[str, Any] = {}
+
+    class _Spy:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.clear()
+            captured.update(kwargs)
+
+    monkeypatch.setattr(cli_mod.typer, "Typer", _Spy)
+    monkeypatch.setattr(cli_mod, "_TYPER_HAS_SUGGEST_COMMANDS", True)
+    monkeypatch.setattr(cli_mod, "_CLICK_HAS_NATIVE_SUGGESTIONS", True)
+
+    # typer >= 0.26: keep typer's suggestion (do not pass suggest_commands=False)
+    monkeypatch.setattr(cli_mod, "_TYPER_VENDORS_RESOLVE_COMMAND", True)
+    cli_mod._make_typer(name="x")
+    assert "suggest_commands" not in captured
+
+    # typer < 0.26: click's native suggestion fires, so disable typer's duplicate
+    monkeypatch.setattr(cli_mod, "_TYPER_VENDORS_RESOLVE_COMMAND", False)
+    cli_mod._make_typer(name="x")
+    assert captured.get("suggest_commands") is False
+
+
 # ---------------------------------------------------------------------------
 # clean help text must match actual behavior (state preserved by default)
 # ---------------------------------------------------------------------------

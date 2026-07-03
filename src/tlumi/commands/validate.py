@@ -54,6 +54,13 @@ def run_validate(
         raise ConfigError(
             f"Syntax error in {config.entry}: {e.msg} (line {e.lineno})",
         ) from None
+    except ValueError as e:
+        # Python 3.10 raises ValueError (not SyntaxError) when the source
+        # contains a NUL byte; U+0000 is valid UTF-8 so read_text() succeeded.
+        # Later versions raise SyntaxError, caught above.
+        raise ConfigError(
+            f"Syntax error in {config.entry}: {e}",
+        ) from None
     checks.append(f"{config.entry} syntax")
     if not json_output:
         print_success(f"{config.entry} syntax is valid")

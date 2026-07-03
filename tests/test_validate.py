@@ -90,3 +90,35 @@ def test_validate_unicode_error_raises_config_error(mock_merge, mock_find, tmp_p
 
     with pytest.raises(ConfigError, match="Cannot read"):
         run_validate()
+
+
+@patch("tlumi.commands.validate.find_project_dir")
+@patch("tlumi.commands.validate.merge_variables")
+def test_validate_nul_byte_entry_raises_config_error(mock_merge, mock_find, tmp_path):
+    """A NUL byte in the entry file yields a clean ConfigError.
+
+    On Python 3.10 compile() raises ValueError (not SyntaxError) for a NUL
+    byte; read_text() succeeds first because U+0000 is valid UTF-8. Later
+    versions raise SyntaxError. We simulate the 3.10 ValueError so the test is
+    meaningful on every interpreter: without the ValueError catch it escapes as
+    a raw traceback.
+    """
+    _setup_project(tmp_path, entry_content="x = 1\x00\n")
+    mock_find.return_value = tmp_path
+    mock_merge.side_effect = lambda cfg, **_: cfg
+
+    import builtins
+
+    real_compile = builtins.compile
+
+    def fake_compile(source, *a, **k):
+        # Mimic Python 3.10: a NUL byte in the source raises ValueError, not
+        # SyntaxError. Delegate for everything else so unrelated compile() calls
+        # (typing ForwardRef, Rich, etc.) keep working during the test.
+        if isinstance(source, str) and "\x00" in source:
+            raise ValueError("source code string cannot contain null bytes")
+        return real_compile(source, *a, **k)
+
+    with patch("builtins.compile", fake_compile):
+        with pytest.raises(ConfigError, match="Syntax error"):
+            run_validate()

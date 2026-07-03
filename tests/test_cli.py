@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import subprocess  # nosec B404 - tests spawn the venv python for a real-pipe check
 import sys
 import textwrap
@@ -234,6 +235,81 @@ def test_run_broken_pipe_during_interrupt_report_keeps_exit_130(mock_pacify):
     assert exc_info.value.exit_code == 130
 
 
+class _LateBrokenPipeFile(io.TextIOBase):
+    """Lets a failure report write succeed, then EPIPEs on the teardown newline.
+
+    Models a reader (e.g. ``... | head -n N``) that consumes the full error
+    report and closes the pipe; the window's trailing-newline teardown write
+    is then the first to hit EPIPE, AFTER the report was fully delivered. This
+    is the boundary the render-time guard in _report_failure does not cover.
+    """
+
+    def __init__(self) -> None:
+        self._report_delivered = False
+
+    def write(self, s: str) -> int:
+        if "Error:" in s or "Interrupted" in s:
+            self._report_delivered = True
+            return len(s)
+        if self._report_delivered and s:
+            raise BrokenPipeError()
+        return len(s)
+
+    def flush(self) -> None:
+        pass
+
+    def isatty(self) -> bool:
+        return False
+
+
+@contextmanager
+def _late_broken_stdout_console():
+    """Point the shared display console at a file that EPIPEs only at teardown."""
+    import tlumi.display as display
+
+    orig_file = display.console._file
+    orig_quiet = display.console.quiet
+    display.console.file = _LateBrokenPipeFile()
+    try:
+        yield
+    finally:
+        display.console._file = orig_file
+        display.console.quiet = orig_quiet
+        del display.console._buffer[:]
+
+
+@patch("tlumi.cli._pacify_broken_stdout")
+def test_run_broken_pipe_at_window_teardown_after_failure_keeps_exit_one(mock_pacify):
+    """A reader closing after the full failure report must not flip exit 1 -> 0.
+
+    The failure report renders fully; only the window-teardown newline EPIPEs.
+    That teardown BrokenPipeError must not replace the pending typer.Exit(1)
+    and land in _run's exit-0 handler, which would mask a failed command as
+    success under `set -o pipefail`.
+    """
+
+    def boom():
+        raise TlumiError("real failure")
+
+    with _late_broken_stdout_console():
+        with pytest.raises(typer.Exit) as exc_info:
+            _run(boom, RunContext())
+    assert exc_info.value.exit_code == 1
+
+
+@patch("tlumi.cli._pacify_broken_stdout")
+def test_run_broken_pipe_at_window_teardown_after_interrupt_keeps_exit_130(mock_pacify):
+    """Ctrl+C followed by a teardown EPIPE (reader consumed the report) keeps 130."""
+
+    def boom():
+        raise KeyboardInterrupt()
+
+    with _late_broken_stdout_console():
+        with pytest.raises(typer.Exit) as exc_info:
+            _run(boom, RunContext())
+    assert exc_info.value.exit_code == 130
+
+
 def test_run_broken_pipe_end_to_end_subprocess():
     """Real pipe: child prints through _run, reader closes early, child exits 0.
 
@@ -274,6 +350,34 @@ def test_run_broken_pipe_end_to_end_subprocess():
     assert stderr == b""
 
 
+@patch("tlumi.cli._pacify_broken_stdout")
+def test_version_command_broken_pipe_exits_zero(mock_pacify):
+    """`tlumi version | head -0` (early-closed stdout) exits 0, not click's silent 1.
+
+    Matches the project-wide EPIPE convention that every other command follows
+    via _run; version()/--version bypass _run so must guard the echo directly.
+    """
+    import tlumi.cli as cli_mod
+
+    with patch.object(cli_mod.typer, "echo", side_effect=BrokenPipeError()):
+        with pytest.raises(typer.Exit) as exc_info:
+            cli_mod.version()
+    assert exc_info.value.exit_code == 0
+    mock_pacify.assert_called_once()
+
+
+@patch("tlumi.cli._pacify_broken_stdout")
+def test_version_callback_broken_pipe_exits_zero(mock_pacify):
+    """`tlumi --version | head -0` also exits 0 on early-closed stdout."""
+    import tlumi.cli as cli_mod
+
+    with patch.object(cli_mod.typer, "echo", side_effect=BrokenPipeError()):
+        with pytest.raises(typer.Exit) as exc_info:
+            cli_mod._version_callback(True)
+    assert exc_info.value.exit_code == 0
+    mock_pacify.assert_called_once()
+
+
 def test_run_success():
     """Successful function completes without raising."""
     called = False
@@ -286,15 +390,23 @@ def test_run_success():
     assert called
 
 
-def test_workspace_notice_handler_suppressed_in_json_mode():
-    """_WorkspaceNoticeHandler suppresses output when _json_active is True."""
+def test_workspace_notice_handler_suppressed_in_json_mode(capsys):
+    """_WorkspaceNoticeHandler produces NO output when _json_active is True.
+
+    The _json_active early-return is the documented mechanism by which --json
+    runs suppress workspace notices; capture stdout AND stderr and assert both
+    are empty so removing the guard fails this test.
+    """
     import logging
 
     import tlumi.cli as cli_mod
+    import tlumi.display as display
 
     original = cli_mod._json_active
+    orig_err_file = display.err_console._file
     try:
         cli_mod._json_active = True
+        display.err_console.file = sys.stderr  # bind to the captured stderr
         handler = cli_mod._WorkspaceNoticeHandler()
         record = logging.LogRecord(
             name="tlumi.workspace",
@@ -307,8 +419,12 @@ def test_workspace_notice_handler_suppressed_in_json_mode():
         )
         # Should not raise or produce output
         handler.emit(record)
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "test warning" not in captured.err
     finally:
         cli_mod._json_active = original
+        display.err_console._file = orig_err_file
 
 
 def test_workspace_notice_handler_routes_to_stderr(capsys):
@@ -533,6 +649,58 @@ def test_quiet_threading_excepthook_suppresses_pulumi_value_error():
     thread.name = "pulumi-event-stream"
     args = _make_excepthook_args(ValueError, ValueError("I/O operation on closed file"), thread)
     # Should not raise (suppressed)
+    with patch("tlumi.cli._original_excepthook") as mock_hook:
+        _quiet_threading_excepthook(args)
+        mock_hook.assert_not_called()
+
+
+def test_quiet_threading_excepthook_suppresses_unnamed_consumer_thread():
+    """The real SDK output-consumer thread ('Thread-N (consumer)') is suppressed.
+
+    The pinned Pulumi SDK creates its output threads unnamed, so they get
+    default names like 'Thread-7 (consumer)', never containing 'pulumi'.
+    Matching only 'pulumi' left this dead code; the real name form must match.
+    """
+    from tlumi.cli import _quiet_threading_excepthook
+
+    thread = MagicMock()
+    thread.name = "Thread-7 (consumer)"
+    args = _make_excepthook_args(ValueError, ValueError("I/O operation on closed file"), thread)
+    with patch("tlumi.cli._original_excepthook") as mock_hook:
+        _quiet_threading_excepthook(args)
+        mock_hook.assert_not_called()
+
+
+def test_quiet_threading_excepthook_suppresses_unnamed_watch_logs_thread():
+    """The real SDK log-watcher thread ('Thread-N (_watch_logs)') is suppressed."""
+    from tlumi.cli import _quiet_threading_excepthook
+
+    thread = MagicMock()
+    thread.name = "Thread-9 (_watch_logs)"
+    args = _make_excepthook_args(ValueError, ValueError("I/O operation on closed file"), thread)
+    with patch("tlumi.cli._original_excepthook") as mock_hook:
+        _quiet_threading_excepthook(args)
+        mock_hook.assert_not_called()
+
+
+def test_quiet_threading_excepthook_suppresses_by_pulumi_traceback():
+    """A default-named thread whose error originates in pulumi/ is suppressed."""
+    from tlumi.cli import _quiet_threading_excepthook
+
+    code = compile(
+        "raise ValueError('I/O operation on closed file')",
+        f"{os.sep}site-packages{os.sep}pulumi{os.sep}automation{os.sep}_cmd.py",
+        "exec",
+    )
+    try:
+        exec(code, {})  # nosec B102 - test-only, fixed source
+    except ValueError:
+        tb = sys.exc_info()[2]
+
+    thread = MagicMock()
+    thread.name = "Thread-3"  # default form, no 'consumer'/'pulumi' marker
+    args = _make_excepthook_args(ValueError, ValueError("I/O operation on closed file"), thread)
+    args.exc_traceback = tb
     with patch("tlumi.cli._original_excepthook") as mock_hook:
         _quiet_threading_excepthook(args)
         mock_hook.assert_not_called()

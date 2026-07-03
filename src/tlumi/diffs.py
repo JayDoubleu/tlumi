@@ -19,6 +19,7 @@ from tlumi.sanitize import (
     _MAX_DEPTH,
     _SENSITIVE_MARKER,
     _UNKNOWN_MARKER,
+    _contains_secret_sentinel,
     _sanitize_value,
 )
 
@@ -412,11 +413,18 @@ def _expand_complex_diff(
     Returns [] when the values differ only inside Pulumi-internal dunder keys
     (__defaults etc.): once those are stripped for display, the rendered old
     and new would be byte-identical, which reads as an unexplainable no-op
-    update. The comparison uses RAW stripped values (pre-sanitize) so
-    genuinely changed secrets that both mask to (sensitive) still differ raw
-    and are still reported.
+    update.
+
+    Secrets are the exception: real preview events scrub a secret to a
+    byte-identical wrapper on both sides even when the engine reports it
+    changed, so the dunder-strip equality above cannot tell a rotated secret
+    from an unchanged one. When a secret sentinel is present we therefore skip
+    the early return and let the per-leaf logic below surface the secret
+    (masked) -- the engine's diff signal for this path is authoritative.
     """
-    if _deep_equal(_strip_dunder_keys(old_val), _strip_dunder_keys(new_val)):
+    if not (
+        _contains_secret_sentinel(old_val) or _contains_secret_sentinel(new_val)
+    ) and _deep_equal(_strip_dunder_keys(old_val), _strip_dunder_keys(new_val)):
         return []
     if not (isinstance(old_val, (dict, list)) and isinstance(new_val, (dict, list))):
         old_fmt, new_fmt = _format_update_pair(old_val, new_val)
@@ -459,7 +467,21 @@ def _expand_complex_diff(
         in_new = key in new_pairs
         if in_old and in_new:
             if _leaf_equal(old_pairs[key], new_pairs[key]):
-                continue  # unchanged
+                if old_pairs[key] == _SENSITIVE_MARKER:
+                    # A secret leaf: both sides sanitize to the same marker even
+                    # when the underlying value changed (scrubbed identically),
+                    # so equality here does not mean unchanged. The engine
+                    # flagged this resource; surface it masked rather than
+                    # dropping a possible rotation.
+                    changes.append(
+                        PropertyChange.update(
+                            sub_path,
+                            _SENSITIVE_MARKER,
+                            _SENSITIVE_MARKER,
+                            forces_replacement=forces_replacement,
+                        )
+                    )
+                continue  # otherwise unchanged
             old_fmt, new_fmt = _format_leaf_pair(old_pairs[key], new_pairs[key])
             changes.append(
                 PropertyChange.update(
@@ -486,11 +508,11 @@ def _expand_complex_diff(
                 )
             )
 
-    # If expansion produced nothing, the raw values differ (the dunder-strip
-    # check above returned) but every sanitized leaf compares equal -- e.g.
-    # changed secrets that both mask to (sensitive). Fall back to a single
-    # change so the update is not silently hidden, even though the rendered
-    # values may look identical.
+    # Safety net: if expansion still produced nothing, the raw values differ
+    # (the equality check above did not return) but every sanitized leaf
+    # compares equal. Fall back to a single change so the update is not
+    # silently hidden, even though the rendered values may look identical.
+    # (Secret leaves are already emitted by the marker branch above.)
     if not changes:
         return [
             PropertyChange.update(
@@ -724,6 +746,21 @@ def extract_property_diffs(meta: StepEventMetadata) -> list[PropertyChange]:
 
         # One level of sub-key diffing when both sides are dicts
         if isinstance(old_val, dict) and isinstance(new_val, dict):
+            # A dict that IS ITSELF a Pulumi secret wrapper (the common
+            # top-level `require_secret` input) must not be descended into:
+            # its internal keys (sig, ciphertext) are not user-facing property
+            # names. _sanitize_value collapses a root wrapper to the bare
+            # marker, so route the whole property through _expand_complex_diff,
+            # which masks it to a single change on `key` -- matching the
+            # detailed_diff strategy and the nested-secret case. A dict that
+            # merely CONTAINS a nested secret sanitizes to a dict (not the
+            # marker), so it still descends and yields e.g. `config.password`.
+            if (
+                _sanitize_value(old_val) == _SENSITIVE_MARKER
+                or _sanitize_value(new_val) == _SENSITIVE_MARKER
+            ):
+                changes.extend(_expand_complex_diff(key, old_val, new_val, forces))
+                continue
             old_dict = old_val
             new_dict = new_val
             all_subkeys = sorted(set(old_dict) | set(new_dict))
@@ -739,8 +776,17 @@ def extract_property_diffs(meta: StepEventMetadata) -> list[PropertyChange]:
                 sub_new = new_dict[sk] if has_sub_new else _MISSING
                 # _deep_equal, not ==: Python's cross-type equality (True == 1,
                 # 1 == 1.0, also inside containers) would hide a change that
-                # renders differently.
-                if has_sub_old and has_sub_new and _deep_equal(sub_old, sub_new):
+                # renders differently. Secret wrappers are exempt: they arrive
+                # byte-identical on both sides even when the engine flagged the
+                # value changed, so an equal comparison here would drop a
+                # rotation. Fall through to _expand_complex_diff, which surfaces
+                # it masked.
+                if (
+                    has_sub_old
+                    and has_sub_new
+                    and _deep_equal(sub_old, sub_new)
+                    and not _contains_secret_sentinel(sub_old)
+                ):
                     continue
                 if sub_old is _MISSING:
                     changes.extend(_expand_value(sub_path, sub_new, "add", forces))

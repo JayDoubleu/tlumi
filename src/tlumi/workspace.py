@@ -40,6 +40,13 @@ def _check_gitignore(config: ProjectConfig, *, quiet: bool = False) -> None:
     if _gitignore_warned or quiet:
         return
     gitignore = config.project_dir / ".gitignore"
+    if gitignore.is_symlink():
+        # A repo-committed symlink (e.g. .gitignore -> /dev/zero or /dev/stdin)
+        # would make read_text() allocate without bound or block forever, so
+        # skip the check rather than follow it -- consistent with the symlink
+        # guards on every other repo-controlled read.
+        _log.debug(".gitignore is a symlink, skipping check")
+        return
     if not gitignore.exists():
         _log.debug("No .gitignore found, skipping check")
         return
@@ -103,7 +110,15 @@ _SENSITIVE_QUERY_KEYS = frozenset(
 # is treated as sensitive. Catches authToken, apiToken, oauth_token,
 # refresh_token, accessToken, x-api-key, etc. without enumerating every
 # vendor-specific variant.
-_SENSITIVE_QUERY_SUBSTRINGS = ("token", "secret", "password", "passwd", "credential", "apikey")
+_SENSITIVE_QUERY_SUBSTRINGS = (
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "credential",
+    "apikey",
+    "signature",
+)
 
 
 def _is_sensitive_query_key(key: str) -> bool:
@@ -228,7 +243,11 @@ def _mask_parsed_backend_url(url: str) -> str:
     return urlunparse(
         parsed._replace(
             netloc=masked_netloc,
-            query=masked_query if parsed.query else parsed.query,
+            # Only substitute the parse_qsl-rejoined query when a key was
+            # actually masked. Otherwise keep the original verbatim: the rejoin
+            # percent-decodes values (prefix=a%26b -> prefix=a&b), which would
+            # mangle a benign query when only the netloc was masked.
+            query=masked_query if query_changed else parsed.query,
             fragment=masked_fragment,
         )
     )
@@ -565,6 +584,55 @@ def safe_export_stack(stack: auto.Stack) -> auto.Deployment:
         else:
             hint = "Run 'tlumi state unlock' if the state is locked."
         raise WorkspaceError(f"Failed to read state: {detail}", hint=hint) from e
+    except RecursionError as e:
+        # The SDK's export_stack json.loads-parses the exported state. Go's
+        # encoding/json accepts deeper nesting than CPython's json (~1000 on
+        # 3.10-3.12), so an attacker-shipped .tlumi/state nested past that limit
+        # raises RecursionError here instead of a clean error.
+        raise WorkspaceError(
+            "Failed to read state: state file nesting is too deep.",
+            hint="The state file may be corrupt or malicious.",
+        ) from e
+
+
+def export_stack_no_secrets(stack: auto.Stack) -> auto.Deployment:
+    """Export stack state WITHOUT decrypting secrets (ciphertext preserved).
+
+    ``Stack.export_stack()`` and the SDK's ``LocalWorkspace.export_stack`` both
+    hardcode ``pulumi stack export --show-secrets``, which decrypts every secret
+    into its plaintext wrapper. That is correct for ``state pull`` (an explicit,
+    user-controlled restore round-trip to stdout), but wrong for the on-disk
+    backups that ``state rm``/``mv``/``push`` write under ``.tlumi/backups/``:
+    those must not persist decrypted secrets even when TLUMI_SECRETS_PASSPHRASE
+    is set. Running the plain ``stack export`` keeps every secret as ciphertext,
+    which restores identically because the encryption salt travels inside
+    ``deployment.secrets_providers`` and ``state push`` requires the same
+    passphrase.
+
+    Error handling mirrors ``safe_export_stack``: CommandError is redacted and
+    wrapped in WorkspaceError, and deeply nested state raises a clean error.
+    """
+    from pulumi.automation import CommandError
+
+    try:
+        result = stack._run_pulumi_cmd_sync(["stack", "export"])
+        state_json = json.loads(result.stdout)
+        return auto.Deployment(
+            version=state_json.get("version"),
+            deployment=state_json.get("deployment"),
+        )
+    except CommandError as e:
+        detail = redact_text(str(e))
+        if "incorrect passphrase" in detail.lower():
+            hint = "Check TLUMI_SECRETS_PASSPHRASE is set correctly."
+        else:
+            hint = "Run 'tlumi state unlock' if the state is locked."
+        raise WorkspaceError(f"Failed to read state: {detail}", hint=hint) from e
+    except RecursionError as e:
+        raise WorkspaceError(
+            "Failed to read state: state file nesting is too deep.",
+            hint="The state file may be corrupt or malicious.",
+        ) from e
 
 
 def get_stack(
@@ -572,6 +640,7 @@ def get_stack(
     install_cli: bool = True,
     quiet: bool = False,
     runtime: bool = True,
+    reconcile_config: bool = True,
 ) -> auto.Stack:
     """Create or select the default Pulumi stack for this project.
 
@@ -584,6 +653,15 @@ def get_stack(
             is broken, the venv is missing, or stack config is unreadable.
             The program is never invoked during state read/import operations,
             only during preview()/up()/destroy()/refresh().
+        reconcile_config: When True (default), reconcile stack config from the
+            merged variables (remove stale sidecar-recorded keys, set current
+            ones). Pass False for ``apply --plan``: the saved plan captures the
+            exact config it was generated against and ``apply --plan`` forbids
+            re-supplying --var/--var-file/TLUMI_VAR_*, so reconciliation would
+            wrongly remove plan-time variables (present in the sidecar but
+            absent from the now-narrower merged variables) before up(plan=...).
+            Pulumi saved plans do not re-inject config into the in-process
+            program, so that removal would break config.require() at apply time.
 
     Handles: Pulumi CLI install, backend configuration, pulumi_home isolation,
     and (in runtime mode) loading the user's infra.py.
@@ -591,7 +669,7 @@ def get_stack(
     # Guard against .tlumi being a symlink (malicious repository)
     if config.tlumi_dir.is_symlink():
         raise WorkspaceError(
-            f".tlumi is a symlink to {config.tlumi_dir.resolve()}",
+            f".tlumi is a symlink to {os.readlink(config.tlumi_dir)}",
             hint="Remove the symlink. A malicious repository may have created it.",
         )
 
@@ -607,7 +685,7 @@ def get_stack(
     for subdir in (config.state_dir, config.cache_dir, config.pulumi_home):
         if subdir.is_symlink():
             raise WorkspaceError(
-                f"{subdir.name} is a symlink to {subdir.resolve()}",
+                f"{subdir.name} is a symlink to {os.readlink(subdir)}",
                 hint="Remove the symlink. A malicious repository may have created it.",
             )
 
@@ -722,6 +800,14 @@ def get_stack(
     # so the project's variables don't matter, and reaching into stack config
     # would couple recovery to the very thing that may be broken.
     if not runtime:
+        return stack
+
+    # apply --plan: preserve the plan-time stack config. The saved plan carries
+    # the config it was generated against and up(plan=...) does not re-inject it
+    # into the in-process program, so reconciling here (which would remove
+    # plan-time variables absent from the now-narrower merged variables) would
+    # break config.require() at apply time. See the reconcile_config docstring.
+    if not reconcile_config:
         return stack
 
     # Remove stale config keys before setting current variables. Ownership

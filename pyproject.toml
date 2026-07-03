@@ -39,7 +39,11 @@ dependencies = [
     # cli.py imports click directly (feature detection for suggestion handling);
     # 8.0 is typer 0.16's own minimum.
     "click>=8.0",
-    "rich>=13.0.0",
+    # rich 13.8.0 is the first release where Console.on_broken_pipe exists and
+    # Console._check_buffer intercepts BrokenPipeError; _TlumiConsole's EPIPE
+    # handling (display.py) overrides that hook, so earlier rich breaks the
+    # exit-code guarantee and fails the broken-pipe tests.
+    "rich>=13.8.0",
     "pulumi>=3.242.0",
     # pyyaml 6.0/6.0.0 fail to build from source on Python 3.12+ (Cython 3
     # incompatibility); 6.0.1 is the first floor installable everywhere we

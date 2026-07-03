@@ -32,7 +32,20 @@ _AWS_ACCESS_KEY = re.compile(r"\b(?:AKIA|ASIA|AIDA|AGPA|AROA|ANPA|ANVA)[A-Z0-9]{
 # JWT-shaped tokens: three base64url segments separated by '.', each at least
 # 8 chars (signature is the third). Header.payload.signature; 8-char floor
 # avoids matching short dotted identifiers.
-_JWT = re.compile(r"\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")
+# Segment length is intentionally unbounded: Azure AD / Entra access-token
+# payloads with group/role claims routinely exceed a couple thousand base64url
+# chars, and a per-segment cap would let an oversized real token escape masking
+# and leak in full. The ReDoS trap is instead closed at the anchors, not with a
+# length cap: '-' is inside the class but is not a regex word char, so a plain
+# \b would open a valid start at every hyphen transition in text like
+# 'a-a-a-...', and an unbounded {8,} at each of those O(n) starts would scan the
+# rest of the run, giving O(n^2). The negative lookbehind/lookahead
+# (?<![A-Za-z0-9_-]) / (?![A-Za-z0-9_-]) restrict a match to true run
+# boundaries (start of a contiguous class-char run), so there is at most one
+# start per run and the scan stays linear even with unbounded segments.
+_JWT = re.compile(
+    r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])"
+)
 
 # Generic key=value / key:value pairs, where key looks credential-bearing.
 # Tolerates whitespace, an optional quote on the *key* so JSON / quoted-key
@@ -90,8 +103,13 @@ _CONNSTR = re.compile(
 )
 
 # GCP service account JSON has "private_key_id" and "private_key" fields.
+# The inner span and the marker word runs are length-bounded: an unbounded lazy
+# '.*?' between BEGIN and END lets every BEGIN marker (when no matching END
+# follows) lazily expand to end-of-input before failing, giving O(n^2) on text
+# with repeated BEGIN markers. A PEM key body is a few KB at most, so 8192 chars
+# is generous while keeping the scan linear on hostile stderr.
 _GCP_PRIVATE_KEY = re.compile(
-    r"(?is)-----BEGIN [A-Z ]*?PRIVATE KEY-----.*?-----END [A-Z ]*?PRIVATE KEY-----"
+    r"(?is)-----BEGIN [A-Z ]{0,32}?PRIVATE KEY-----.{0,8192}?-----END [A-Z ]{0,32}?PRIVATE KEY-----"
 )
 
 # Credentials embedded in a URL netloc: scheme://user:password@host. Backend
@@ -108,18 +126,35 @@ _URL_USERINFO = re.compile(
     r"(?P<user>[^:/?#\s@]{0,256}):(?P<pw>[^@/?#\s]{1,256})@"
 )
 
+# Bare-userinfo credential URLs: scheme://TOKEN@host, with no ':' in the
+# userinfo. S3-compatible/token-auth remotes place the whole credential in the
+# userinfo, and _mask_backend_url in workspace.py already classifies a lone
+# userinfo as a credential ("backend URLs almost never use bare usernames for
+# identification"). _URL_USERINFO above (which requires a ':') runs first and
+# consumes the user:pass form; this pattern (userinfo excludes ':') then catches
+# the remaining bare-token shape. Quantifiers bounded to keep the scan linear.
+_URL_BARE_USERINFO = re.compile(
+    r"(?i)(?P<scheme>[a-z][a-z0-9+.\-]{0,31}://)(?P<token>[^:/?#\s@]{1,256})@"
+)
+
 # Azure SAS query params: ?sv=...&se=...&sig=... The signature (sig) is the
 # credential itself; sv/se are masked too for parity with the backend-URL
 # masking in workspace.py (_SENSITIVE_QUERY_KEYS), which classifies all three
 # as sensitive. Anchored on a query delimiter so unrelated two-letter keys in
-# free-form prose are not masked.
+# free-form prose are not masked. The signature alternative allows a bounded
+# prefix so AWS/GCS presigned-URL keys (X-Amz-Signature, X-Goog-Signature) are
+# caught too -- their signature is the replayable credential of the presigned URL.
 _SAS_QUERY = re.compile(
-    r"(?i)(?P<delim>[?&])(?P<key>signature|sig|sv|se)=(?P<value>[^&\s\"']{1,512})"
+    r"(?i)(?P<delim>[?&])(?P<key>[a-z0-9_-]{0,64}signature|sig|sv|se)=(?P<value>[^&\s\"']{1,512})"
 )
 
 
 def _sub_url_userinfo(match: re.Match[str]) -> str:
     return f"{match.group('scheme')}{match.group('user')}:{REDACTED}@"
+
+
+def _sub_url_bare_userinfo(match: re.Match[str]) -> str:
+    return f"{match.group('scheme')}{REDACTED}@"
 
 
 def _sub_sas(match: re.Match[str]) -> str:
@@ -151,6 +186,7 @@ def redact_text(text: str) -> str:
     out = _AWS_ACCESS_KEY.sub(REDACTED, out)
     out = _JWT.sub(REDACTED, out)
     out = _URL_USERINFO.sub(_sub_url_userinfo, out)
+    out = _URL_BARE_USERINFO.sub(_sub_url_bare_userinfo, out)
     out = _AUTH_HEADER.sub(_sub_auth_header, out)
     out = _CONNSTR.sub(_sub_connstr, out)
     out = _SAS_QUERY.sub(_sub_sas, out)
