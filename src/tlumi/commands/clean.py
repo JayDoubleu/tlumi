@@ -27,13 +27,13 @@ def _safe_rmtree(path: Path) -> None:
     case handled in run_clean().
     """
     if path.is_symlink():
-        _log.debug("Unlinking symlink: %s -> %s", path, path.resolve())
+        _log.debug("Unlinking symlink: %s -> %s", path, os.readlink(path))
         os.unlink(path)
         return
     with os.scandir(path) as entries:
         for entry in entries:
             if entry.is_symlink():
-                _log.debug("Unlinking symlink: %s -> %s", entry.path, Path(entry.path).resolve())
+                _log.debug("Unlinking symlink: %s -> %s", entry.path, os.readlink(entry.path))
                 os.unlink(entry.path)
             elif entry.is_dir(follow_symlinks=False):
                 _safe_rmtree(Path(entry.path))
@@ -48,7 +48,7 @@ def run_clean(auto_approve: bool = False, include_state: bool = False) -> None:
     tlumi_dir = project_dir / TLUMI_DIR
 
     if tlumi_dir.is_symlink():
-        target = tlumi_dir.resolve()
+        target = os.readlink(tlumi_dir)
         print_warning(
             f".tlumi is a symlink to {target}. Unlinking it (target will NOT be deleted)."
         )
@@ -113,7 +113,10 @@ def run_clean(auto_approve: bool = False, include_state: bool = False) -> None:
         for p in removable:
             try:
                 _safe_rmtree(p)
-            except OSError as e:
+            except (OSError, RecursionError) as e:
+                # RecursionError: an attacker-shipped deeply nested directory
+                # chain under .tlumi/ exceeds the interpreter recursion limit;
+                # collect it like any other removal failure instead of crashing.
                 errors.append(f"{p.name}: {e}")
         for p in removable_files:
             try:
@@ -161,7 +164,10 @@ def run_clean(auto_approve: bool = False, include_state: bool = False) -> None:
 
     try:
         _safe_rmtree(tlumi_dir)
-    except OSError as e:
+    except (OSError, RecursionError) as e:
+        # RecursionError: an attacker-shipped deeply nested directory chain
+        # under .tlumi/ exceeds the interpreter recursion limit; surface a
+        # clean TlumiError instead of a raw traceback.
         raise TlumiError(
             f"Failed to remove .tlumi/: {e}",
             hint="Check file permissions and try again.",

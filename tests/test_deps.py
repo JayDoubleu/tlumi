@@ -200,8 +200,13 @@ def test_deps_list_calls_uv_list(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_deps_add_skips_duplicate_packages(tmp_path):
-    """deps add does not re-add packages already in requirements.txt."""
+def test_deps_add_updates_existing_spec_in_place(tmp_path):
+    """Re-adding a listed package with a new version spec updates the pin in place.
+
+    The install below always runs with the new spec, so the manifest must record
+    it too; otherwise the venv is upgraded while requirements.txt keeps the old
+    pin and the next 'deps install' / fresh clone silently reverts.
+    """
     config = MagicMock()
     config.project_dir = tmp_path
     config.venv_python = tmp_path / "venv" / "bin" / "python"
@@ -219,10 +224,86 @@ def test_deps_add_skips_duplicate_packages(tmp_path):
                 with patch("tlumi.commands.deps.uv_install"):
                     run_deps_add(["pulumi-aws>=6.0.0"])
 
-    # requirements.txt should NOT have a second entry
+    # The single entry is updated to the new spec, not duplicated or left stale.
     lines = [ln for ln in req_path.read_text().splitlines() if ln.strip()]
-    assert len(lines) == 1
-    assert lines[0] == "pulumi-aws>=5.0.0"
+    assert lines == ["pulumi-aws>=6.0.0"]
+
+
+def test_deps_add_same_spec_is_noop(tmp_path):
+    """Re-adding an identical spec does not duplicate the line."""
+    config = MagicMock()
+    config.project_dir = tmp_path
+    config.venv_python = tmp_path / "venv" / "bin" / "python"
+    config.venv_python.parent.mkdir(parents=True)
+    config.venv_python.touch()
+    config.venv_dir = tmp_path / "venv"
+
+    req_path = tmp_path / "requirements.txt"
+    req_path.write_text("pulumi-aws>=5.0.0\n")
+
+    with patch("tlumi.commands.deps.load_config", return_value=config):
+        with patch("tlumi.commands.deps.find_project_dir", return_value=tmp_path):
+            with patch("tlumi.commands.deps.ensure_uv", return_value="/usr/bin/uv"):
+                with patch("tlumi.commands.deps.uv_install"):
+                    run_deps_add(["pulumi-aws>=5.0.0"])
+
+    lines = [ln for ln in req_path.read_text().splitlines() if ln.strip()]
+    assert lines == ["pulumi-aws>=5.0.0"]
+
+
+def test_deps_add_bare_name_preserves_existing_pin(tmp_path):
+    """Re-adding a BARE name for an already-pinned package must not strip the pin.
+
+    `deps add pulumi-aws` (no constraint) against an existing
+    `pulumi-aws==6.0.0  # locked for prod` line must be a no-op: overwriting it
+    with the bare name would silently discard the user-authored version pin and
+    inline comment (data loss), and the unpinned install would then upgrade the
+    venv off the pin.
+    """
+    config = MagicMock()
+    config.project_dir = tmp_path
+    config.venv_python = tmp_path / "venv" / "bin" / "python"
+    config.venv_python.parent.mkdir(parents=True)
+    config.venv_python.touch()
+    config.venv_dir = tmp_path / "venv"
+
+    req_path = tmp_path / "requirements.txt"
+    req_path.write_text("pulumi-aws==6.0.0  # locked for prod\n")
+
+    with patch("tlumi.commands.deps.load_config", return_value=config):
+        with patch("tlumi.commands.deps.find_project_dir", return_value=tmp_path):
+            with patch("tlumi.commands.deps.ensure_uv", return_value="/usr/bin/uv"):
+                with patch("tlumi.commands.deps.uv_install"):
+                    run_deps_add(["pulumi-aws"])
+
+    lines = [ln for ln in req_path.read_text().splitlines() if ln.strip()]
+    assert lines == ["pulumi-aws==6.0.0  # locked for prod"]
+
+
+def test_deps_add_preserves_last_line_without_trailing_newline(tmp_path):
+    """A hand-edited requirements.txt lacking a trailing newline must not merge.
+
+    Appending the new entry directly would produce 'pulumi-randompulumi-aws',
+    destroying both the existing package and the new one.
+    """
+    config = MagicMock()
+    config.project_dir = tmp_path
+    config.venv_python = tmp_path / "venv" / "bin" / "python"
+    config.venv_python.parent.mkdir(parents=True)
+    config.venv_python.touch()
+    config.venv_dir = tmp_path / "venv"
+
+    req_path = tmp_path / "requirements.txt"
+    req_path.write_bytes(b"pulumi-random")  # no trailing newline
+
+    with patch("tlumi.commands.deps.load_config", return_value=config):
+        with patch("tlumi.commands.deps.find_project_dir", return_value=tmp_path):
+            with patch("tlumi.commands.deps.ensure_uv", return_value="/usr/bin/uv"):
+                with patch("tlumi.commands.deps.uv_install"):
+                    run_deps_add(["pulumi-aws"])
+
+    lines = [ln for ln in req_path.read_text().splitlines() if ln.strip()]
+    assert lines == ["pulumi-random", "pulumi-aws"]
 
 
 def test_deps_add_dedup_with_normalization(tmp_path):
@@ -371,3 +452,32 @@ def test_deps_add_unicode_decode_error(tmp_path):
         with patch("tlumi.commands.deps.find_project_dir", return_value=tmp_path):
             with pytest.raises(WorkspaceError, match="Cannot read requirements.txt"):
                 run_deps_add(["new-package"])
+
+
+def test_deps_add_requirements_symlink_loop_clean_error(tmp_path):
+    """A symlink-loop requirements.txt yields a clean WorkspaceError, not a raw
+    RuntimeError from Path.resolve() (Python 3.10-3.12 raise on loops)."""
+    from pathlib import Path
+
+    config = MagicMock()
+    config.project_dir = tmp_path
+    config.venv_python = tmp_path / "venv" / "bin" / "python"
+    config.venv_python.parent.mkdir(parents=True)
+    config.venv_python.touch()
+    config.venv_dir = tmp_path / "venv"
+
+    req_path = tmp_path / "requirements.txt"
+    req_path.symlink_to(req_path)  # self-referential loop
+
+    orig_resolve = Path.resolve
+
+    def fake_resolve(self, *a, **k):
+        if self.is_symlink():
+            raise RuntimeError(f"Symlink loop from {self}")
+        return orig_resolve(self, *a, **k)
+
+    with patch("tlumi.commands.deps.load_config", return_value=config):
+        with patch("tlumi.commands.deps.find_project_dir", return_value=tmp_path):
+            with patch.object(Path, "resolve", fake_resolve):
+                with pytest.raises(WorkspaceError, match="requirements.txt is a symlink"):
+                    run_deps_add(["new-package"])

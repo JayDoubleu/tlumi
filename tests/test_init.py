@@ -346,3 +346,39 @@ def test_init_rejects_invalid_explicit_name(tmp_path: Path) -> None:
     """An explicit --name is still validated on fresh init."""
     with pytest.raises(ConfigError, match="Invalid project name"):
         run_init(project_dir=tmp_path, name="1nvalid")
+
+
+def _raise_runtimeerror_on_symlink_resolve(monkeypatch) -> None:
+    """Make Path.resolve() raise on symlinks, mimicking Python 3.10-3.12 loops.
+
+    On those versions Path.resolve() raises RuntimeError('Symlink loop ...')
+    for a looping symlink even in non-strict mode; 3.13+ returns cleanly.
+    """
+    orig_resolve = Path.resolve
+
+    def fake_resolve(self, *a, **k):
+        if self.is_symlink():
+            raise RuntimeError(f"Symlink loop from {self}")
+        return orig_resolve(self, *a, **k)
+
+    monkeypatch.setattr(Path, "resolve", fake_resolve)
+
+
+def test_init_tlumi_symlink_loop_clean_error(tmp_path: Path, monkeypatch) -> None:
+    """A symlink-loop .tlumi yields a clean ConfigError, not a raw RuntimeError."""
+    symlink = tmp_path / ".tlumi"
+    symlink.symlink_to(symlink)  # self-referential loop
+    _raise_runtimeerror_on_symlink_resolve(monkeypatch)
+
+    with pytest.raises(ConfigError, match=".tlumi is a symlink"):
+        run_init(project_dir=tmp_path, name="testproject")
+
+
+def test_init_tlumi_yaml_symlink_loop_clean_error(tmp_path: Path, monkeypatch) -> None:
+    """A symlink-loop tlumi.yaml yields a clean ConfigError, not a RuntimeError."""
+    symlink = tmp_path / "tlumi.yaml"
+    symlink.symlink_to(symlink)  # self-referential loop
+    _raise_runtimeerror_on_symlink_resolve(monkeypatch)
+
+    with pytest.raises(ConfigError, match="tlumi.yaml is a symlink"):
+        run_init(project_dir=tmp_path, name="testproject")

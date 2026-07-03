@@ -504,14 +504,133 @@ def test_real_change_next_to_dunder_change_still_reported():
         assert c.old_value != c.new_value
 
 
+# Real preview events scrub a secret input to a BYTE-IDENTICAL wrapper on both
+# sides even when the engine reports the value changed (meta.diffs / detailed_diff
+# lists the key). The wrapper carries only the sig and a "[secret]" ciphertext --
+# no cleartext payload -- so neither raw nor sanitized comparison can see the
+# change; the engine's own diff signal is authoritative and the secret must still
+# surface (masked). This is the shape the fabricated "value" payload never had.
+def _scrubbed_secret():
+    return {_PULUMI_SECRET_SIG: _PULUMI_SECRET_VALUE, "ciphertext": "[secret]"}
+
+
 def test_changed_secret_still_reported_despite_identical_masking():
-    """Raw pre-sanitize comparison: two different secrets both mask to
-    (sensitive) but must still surface as an update, not be suppressed."""
-    old_secret = {_PULUMI_SECRET_SIG: _PULUMI_SECRET_VALUE, "value": "old-hunter2"}
-    new_secret = {_PULUMI_SECRET_SIG: _PULUMI_SECRET_VALUE, "value": "new-hunter2"}
-    changes = _expand_complex_diff("cfg", {"pw": old_secret}, {"pw": new_secret}, False)
+    """A scrubbed (byte-identical) secret wrapper the engine flagged as changed
+    must still surface as a masked update, not be suppressed as a no-op."""
+    changes = _expand_complex_diff("cfg", _scrubbed_secret(), _scrubbed_secret(), False)
     assert len(changes) == 1
     assert changes[0].kind == "update"
-    assert "(sensitive)" in (changes[0].old_value or "")
-    assert "old-hunter2" not in (changes[0].old_value or "")
-    assert "new-hunter2" not in (changes[0].new_value or "")
+    assert changes[0].path == "cfg"
+    assert changes[0].old_value == "(sensitive)"
+    assert changes[0].new_value == "(sensitive)"
+
+
+def test_changed_secret_reported_alongside_changed_sibling():
+    """Rotating a secret while another field changes: BOTH must appear.
+
+    The per-leaf skip compares sanitized leaves, and two scrubbed secrets both
+    flatten to "(sensitive)"; the empty-changes fallback only fires when the
+    changes list is entirely empty, so a changed sibling used to swallow the
+    secret. The secret must still be listed (masked) next to the sibling.
+    """
+    old = {"password": _scrubbed_secret(), "host": "db1.example.com", "extra": "x" * 60}
+    new = {"password": _scrubbed_secret(), "host": "db2.example.com", "extra": "x" * 60}
+    changes = _expand_complex_diff("config", old, new, False)
+    paths = {c.path for c in changes}
+    assert "config.host" in paths
+    assert "config.password" in paths
+    pw = next(c for c in changes if c.path == "config.password")
+    assert pw.kind == "update"
+    assert pw.old_value == "(sensitive)"
+    assert pw.new_value == "(sensitive)"
+
+
+def test_scrubbed_secret_change_surfaced_via_strategy2():
+    """extract_property_diffs Strategy 2 (meta.diffs) surfaces a scrubbed secret."""
+    old = {"password": _scrubbed_secret(), "host": "db1.example.com", "extra": "y" * 60}
+    new = {"password": _scrubbed_secret(), "host": "db2.example.com", "extra": "y" * 60}
+    changes = extract_property_diffs(
+        _meta(
+            OpType.UPDATE, diffs=["config"], old_inputs={"config": old}, new_inputs={"config": new}
+        )
+    )
+    paths = {c.path for c in changes}
+    assert "config.password" in paths
+    assert "config.host" in paths
+
+
+def test_scrubbed_secret_change_surfaced_via_strategy2_subkey():
+    """The Strategy 2 sub-key loop must not skip a byte-identical secret wrapper."""
+    changes = extract_property_diffs(
+        _meta(
+            OpType.UPDATE,
+            diffs=["config"],
+            old_inputs={"config": {"password": _scrubbed_secret()}},
+            new_inputs={"config": {"password": _scrubbed_secret()}},
+        )
+    )
+    pw = [c for c in changes if c.path == "config.password"]
+    assert len(pw) == 1
+    assert pw[0].kind == "update"
+    assert pw[0].old_value == "(sensitive)"
+    assert pw[0].new_value == "(sensitive)"
+
+
+def test_scrubbed_top_level_secret_surfaced_via_strategy2_no_wrapper_key():
+    """A TOP-LEVEL secret input (the common require_secret shape) must render on
+    the property path itself, not descend into the wrapper's internal keys.
+
+    Strategy 2's sub-key loop sees both sides as dicts (the raw secret wrapper)
+    and would otherwise expose Pulumi's internal ``ciphertext`` key as a bogus
+    ``adminPassword.ciphertext`` property path. The whole wrapper must collapse
+    to a single masked change on ``adminPassword``, matching Strategy 1.
+    """
+    changes = extract_property_diffs(
+        _meta(
+            OpType.UPDATE,
+            diffs=["adminPassword"],
+            old_inputs={"adminPassword": _scrubbed_secret()},
+            new_inputs={"adminPassword": _scrubbed_secret()},
+        )
+    )
+    paths = {c.path for c in changes}
+    assert "adminPassword.ciphertext" not in paths
+    pw = [c for c in changes if c.path == "adminPassword"]
+    assert len(pw) == 1
+    assert pw[0].kind == "update"
+    assert pw[0].old_value == "(sensitive)"
+    assert pw[0].new_value == "(sensitive)"
+
+
+def test_scrubbed_secret_change_surfaced_via_strategy1_coarse():
+    """Strategy 1 with a coarse detailed_diff path surfaces the scrubbed secret."""
+    old = {"password": _scrubbed_secret(), "host": "db1.example.com", "extra": "z" * 60}
+    new = {"password": _scrubbed_secret(), "host": "db2.example.com", "extra": "z" * 60}
+    changes = extract_property_diffs(
+        _meta(
+            OpType.UPDATE,
+            detailed_diff={"config": _detailed("update")},
+            old_inputs={"config": old},
+            new_inputs={"config": new},
+        )
+    )
+    paths = {c.path for c in changes}
+    assert "config.password" in paths
+    assert "config.host" in paths
+
+
+def test_scrubbed_secret_change_surfaced_via_strategy1_fine():
+    """Strategy 1 with a fine detailed_diff path pointing straight at the secret."""
+    changes = extract_property_diffs(
+        _meta(
+            OpType.UPDATE,
+            detailed_diff={"config.password": _detailed("update")},
+            old_inputs={"config": {"password": _scrubbed_secret()}},
+            new_inputs={"config": {"password": _scrubbed_secret()}},
+        )
+    )
+    pw = [c for c in changes if c.path == "config.password"]
+    assert len(pw) == 1
+    assert pw[0].kind == "update"
+    assert pw[0].old_value == "(sensitive)"
+    assert pw[0].new_value == "(sensitive)"

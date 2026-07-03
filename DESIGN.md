@@ -115,7 +115,7 @@ At max depth we return `(sensitive)` as the safe default to prevent leaks under 
 
 ### ADR-011: Variable precedence
 
-Highest to lowest: `--var KEY=VALUE` > `--var-file PATH` > `TLUMI_VAR_*` env vars > `tlumi.yaml`. Variable values must be scalars (str/int/float/bool); lists and dicts are rejected. YAML booleans are preserved as lowercase strings (`"true"`, `"false"`).
+Highest to lowest: `--var KEY=VALUE` > `--var-file PATH` > `TLUMI_VAR_*` env vars > `tlumi.yaml`. Variable values must be scalars; lists and dicts are rejected. Accepted unquoted forms are str, plain decimal int, and canonical `true`/`false` bool. Every lossy YAML form is rejected with a hint to quote the value: floats (YAML silently rewrites `1.10` to `1.1`), non-decimal ints (`0777` to 511, `0x1A` to 26, `1:30` to 90, `+7` to 7), YAML 1.1 boolean keywords (`yes`/`no`/`on`/`off`, the "Norway problem" where an ISO country code `NO` becomes `false`), and timestamps/dates (`2026-07-02T10:00:00Z`, silently reformatted). A quoted value arrives as a string. Embedded NUL bytes in a key or value are also rejected (they cannot be passed to the Pulumi CLI). YAML booleans are preserved as lowercase strings (`"true"`, `"false"`). This is enforced by a strict YAML loader that retags each lossy scalar to a raw-text marker so the rejection can quote exactly what the user wrote.
 
 `--var` appears in shell history, so we warn when key names look sensitive (`secret`, `password`, `token`, etc.) unless the caller is in JSON/quiet mode. Documented in the README under "Security".
 

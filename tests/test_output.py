@@ -522,6 +522,35 @@ def test_output_raw_scalar_stays_unquoted(mock_find, mock_config, mock_stack, ca
 @patch("tlumi.commands.output.get_stack")
 @patch("tlumi.commands.output.load_config")
 @patch("tlumi.commands.output.find_project_dir")
+def test_output_raw_bool_and_none_match_json_channels(mock_find, mock_config, mock_stack, capsys):
+    """--raw booleans/None emit JSON tokens, not Python repr ('True'/'None').
+
+    --raw is the documented shell-capture surface and must agree with the
+    lowercase 'true'/'false'/'null' every other tlumi channel emits.
+    """
+    mock_find.return_value = "/fake"
+    mock_config.return_value = MagicMock()
+    stack = MagicMock(spec=Stack)
+    stack.export_stack.return_value = _stack_state(
+        {"enabled": True, "disabled": False, "empty": None}
+    )
+    mock_stack.return_value = stack
+
+    from tlumi.commands.output import run_output
+
+    run_output(name="enabled", raw=True)
+    assert capsys.readouterr().out == "true\n"
+
+    run_output(name="disabled", raw=True)
+    assert capsys.readouterr().out == "false\n"
+
+    run_output(name="empty", raw=True)
+    assert capsys.readouterr().out == "null\n"
+
+
+@patch("tlumi.commands.output.get_stack")
+@patch("tlumi.commands.output.load_config")
+@patch("tlumi.commands.output.find_project_dir")
 def test_output_composite_show_secrets_reveals_nested(mock_find, mock_config, mock_stack, capsys):
     """--show-secrets reveals nested secrets from stack.outputs() plaintext."""
     mock_find.return_value = "/fake"

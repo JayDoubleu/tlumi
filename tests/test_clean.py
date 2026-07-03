@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from unittest.mock import patch
 
+import pytest
+
 from tlumi.commands.clean import _safe_rmtree, run_clean
 
 
@@ -334,3 +336,72 @@ def test_clean_symlinked_tlumi_dir_still_warns_loudly(mock_find, tmp_path, capsy
     output = capsys.readouterr().out
     assert ".tlumi is a symlink" in output
     assert external.exists()
+
+
+# --- hostile-repo hardening: symlink loops and deep nesting ---
+
+
+@patch("tlumi.commands.clean.find_project_dir")
+def test_clean_symlink_loop_tlumi_dir_no_crash(mock_find, tmp_path, capsys):
+    """A symlink-loop .tlumi is unlinked cleanly, not crashed by Path.resolve()
+    (Python 3.10-3.12 raise RuntimeError on looping symlinks)."""
+    from pathlib import Path
+
+    mock_find.return_value = tmp_path
+
+    tlumi_dir = tmp_path / ".tlumi"
+    tlumi_dir.symlink_to(tlumi_dir)  # self-referential loop
+
+    orig_resolve = Path.resolve
+
+    def fake_resolve(self, *a, **k):
+        if self.is_symlink():
+            raise RuntimeError(f"Symlink loop from {self}")
+        return orig_resolve(self, *a, **k)
+
+    with patch.object(Path, "resolve", fake_resolve):
+        run_clean(auto_approve=True)  # must not raise
+
+    output = capsys.readouterr().out
+    assert ".tlumi is a symlink" in output
+    assert not tlumi_dir.exists()  # the symlink was unlinked
+
+
+@patch("tlumi.commands.clean.find_project_dir")
+def test_clean_full_removal_recursion_error_is_tlumi_error(mock_find, tmp_path):
+    """A RecursionError from _safe_rmtree (deep attacker-shipped tree) surfaces
+    as a clean TlumiError on the full-removal path, not a raw traceback."""
+    from tlumi.errors import TlumiError
+
+    mock_find.return_value = tmp_path
+    # No state content -> full-removal path
+    (tmp_path / ".tlumi" / "cache").mkdir(parents=True)
+
+    with patch(
+        "tlumi.commands.clean._safe_rmtree",
+        side_effect=RecursionError("maximum recursion depth exceeded"),
+    ):
+        with pytest.raises(TlumiError, match="Failed to remove"):
+            run_clean(auto_approve=True, include_state=True)
+
+
+@patch("tlumi.commands.clean.find_project_dir")
+def test_clean_partial_removal_recursion_error_is_tlumi_error(mock_find, tmp_path):
+    """A RecursionError from _safe_rmtree on the state-preserving partial path is
+    collected as a clean TlumiError, not a raw traceback."""
+    from tlumi.errors import TlumiError
+
+    mock_find.return_value = tmp_path
+    tlumi_dir = tmp_path / ".tlumi"
+    # State present so the partial (state-preserving) path runs, plus a cache
+    # dir that will be removed.
+    (tlumi_dir / "state").mkdir(parents=True)
+    (tlumi_dir / "state" / "marker").write_text("x")
+    (tlumi_dir / "cache").mkdir()
+
+    with patch(
+        "tlumi.commands.clean._safe_rmtree",
+        side_effect=RecursionError("maximum recursion depth exceeded"),
+    ):
+        with pytest.raises(TlumiError, match="Failed to remove some items"):
+            run_clean(auto_approve=True, include_state=False)

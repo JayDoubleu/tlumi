@@ -23,6 +23,30 @@ from tlumi.commands.state import (
 )
 from tlumi.errors import WorkspaceError
 
+
+@pytest.fixture(autouse=True)
+def _stub_ciphertext_backup_export():
+    """Route the backup's ciphertext export to whatever the tests stub for reads.
+
+    ``_create_backup`` sources its snapshot from ``export_stack_no_secrets`` (a
+    real ``pulumi stack export`` CLI call) so decrypted secrets never land on
+    disk. Unit tests cannot run that CLI; they stub state reads either by
+    setting ``stack.export_stack`` or by patching ``safe_export_stack``. Mirror
+    the ciphertext export to ``safe_export_stack`` (looked up at call time so a
+    per-test ``@patch`` is honoured) so both stubbing styles keep working; for
+    the secret-free fixtures used here the backup content is identical either
+    way. ``test_backup_does_not_persist_decrypted_secrets`` overrides this to
+    supply a distinct ciphertext deployment.
+    """
+    from tlumi.commands import state as state_mod
+
+    def _mirror(stack):
+        return state_mod.safe_export_stack(stack)
+
+    with patch("tlumi.commands.state.export_stack_no_secrets", side_effect=_mirror):
+        yield
+
+
 _RESOURCES = [
     {
         "urn": "urn:pulumi:default::myproj::aws:s3:BucketV2::my-bucket",
@@ -294,8 +318,14 @@ def test_push_success(mock_find, mock_config, mock_get_stack, tmp_path, capsys):
 
     run_state_push(str(state_file), auto_approve=True)
 
-    # Verify import_stack was called
+    # Verify import_stack was called with the deployment from the SOURCE file,
+    # not the pre-push state (a miswired restore would silently import the wrong
+    # snapshot while reporting success). state push is the documented recovery
+    # primitive, so the payload wiring is the load-bearing assertion here.
     mock_stack.import_stack.assert_called_once()
+    imported = mock_stack.import_stack.call_args[0][0]
+    assert imported.version == state_data["version"]
+    assert imported.deployment == state_data["deployment"]
 
     # Verify backup was created
     backups = list((tmp_path / ".tlumi" / "backups").glob("state_push_*.json"))
@@ -1343,6 +1373,64 @@ def test_state_rm_backup_content(mock_find, mock_config, mock_get_stack, tmp_pat
     assert "resources" in data["deployment"]
 
 
+@patch("tlumi.commands.state.get_stack")
+@patch("tlumi.commands.state.load_config")
+@patch("tlumi.commands.state.find_project_dir")
+def test_backup_does_not_persist_decrypted_secrets(
+    mock_find, mock_config, mock_get_stack, tmp_path
+):
+    """state rm backups must store ciphertext, never decrypted secret plaintext.
+
+    safe_export_stack (the SDK export) runs `stack export --show-secrets` and
+    decrypts every secret to plaintext. Writing that to .tlumi/backups/ would
+    drop decrypted secrets onto disk even when TLUMI_SECRETS_PASSPHRASE is set.
+    The backup must instead use the ciphertext export (export_stack_no_secrets),
+    which restores identically because the salt travels in secrets_providers.
+    """
+    config = MagicMock()
+    config.name = "myproj"
+    config.tlumi_dir = tmp_path / ".tlumi"
+    config.tlumi_dir.mkdir()
+    mock_config.return_value = config
+
+    stack_resource = {
+        "urn": "urn:pulumi:default::myproj::pulumi:pulumi:Stack::myproj-default",
+        "type": "pulumi:pulumi:Stack",
+    }
+    target = {
+        "urn": "urn:pulumi:default::myproj::aws:s3:BucketV2::my-bucket",
+        "type": "aws:s3:BucketV2",
+        "id": "b-123",
+        "inputs": {},
+        # Decrypted (--show-secrets) form: the plaintext leaks the secret value.
+        "outputs": {
+            "secret_key": {_SECRET_SIG: _SECRET_VAL, "plaintext": json.dumps("hunter2-secret")},
+        },
+    }
+    # The ciphertext export keeps the same secret as an encrypted wrapper.
+    target_ciphertext = {
+        **target,
+        "outputs": {"secret_key": {_SECRET_SIG: _SECRET_VAL, "ciphertext": "v1:abc123=="}},
+    }
+
+    mock_stack = MagicMock(spec=Stack)
+    mock_stack.export_stack.return_value = mock_state([stack_resource, target], version=3)
+    mock_get_stack.return_value = mock_stack
+
+    ciphertext_state = mock_state([stack_resource, target_ciphertext], version=3)
+    with patch("tlumi.commands.state.export_stack_no_secrets", return_value=ciphertext_state):
+        run_state_rm("my-bucket", auto_approve=True)
+
+    backups = list((tmp_path / ".tlumi" / "backups").glob("state_rm_*.json"))
+    assert len(backups) == 1
+    raw = backups[0].read_text()
+    # No decrypted secret value on disk...
+    assert "hunter2-secret" not in raw
+    assert "plaintext" not in raw
+    # ...but the secret is preserved in encrypted form so restore still works.
+    assert "ciphertext" in raw
+
+
 # ---------------------------------------------------------------------------
 # T4: state rm import failure includes backup path
 # ---------------------------------------------------------------------------
@@ -1566,6 +1654,57 @@ def test_state_rm_rotates_backups(mock_find, mock_config, mock_get_stack, tmp_pa
 
     backups = list(backup_dir.glob("state_*.json"))
     assert len(backups) == _MAX_BACKUPS
+
+
+@patch("tlumi.commands.state.get_stack")
+@patch("tlumi.commands.state.load_config")
+@patch("tlumi.commands.state.find_project_dir")
+def test_state_rm_rotation_preserves_push_backup(mock_find, mock_config, mock_get_stack, tmp_path):
+    """A chatty state rm must not rotate out the state_push restore point.
+
+    Per-op quotas cap state_rm_/state_mv_/state_push_ independently. Under a
+    global quota, 11+ rm backups would evict the single older push backup a
+    user kept as a restore point -- silent data loss.
+    """
+    import time
+
+    config = MagicMock()
+    config.tlumi_dir = tmp_path / ".tlumi"
+    config.tlumi_dir.mkdir()
+    mock_config.return_value = config
+
+    backup_dir = config.tlumi_dir / "backups"
+    backup_dir.mkdir(parents=True)
+    # The oldest file is the push backup we want to protect.
+    push_backup = backup_dir / "state_push_20260101_000000_000000.json"
+    push_backup.write_text("{}")
+    time.sleep(0.02)
+    # A full quota of newer rm backups, so the next rm triggers rotation.
+    for i in range(_MAX_BACKUPS):
+        (backup_dir / f"state_rm_2026020{i:02d}_000000_000000.json").write_text("{}")
+
+    stack_resource = {
+        "urn": "urn:pulumi:default::myproj::pulumi:pulumi:Stack::myproj-default",
+        "type": "pulumi:pulumi:Stack",
+    }
+    target = {
+        "urn": "urn:pulumi:default::myproj::aws:s3:BucketV2::my-bucket",
+        "type": "aws:s3:BucketV2",
+        "id": "b-123",
+        "inputs": {},
+        "outputs": {},
+    }
+
+    mock_stack = MagicMock(spec=Stack)
+    mock_stack.export_stack.return_value = mock_state([stack_resource, target], version=3)
+    mock_get_stack.return_value = mock_stack
+
+    run_state_rm("my-bucket", auto_approve=True)
+
+    # The rm rotation trimmed only rm backups to the cap; the push backup (the
+    # user's restore point) survives.
+    assert push_backup.exists()
+    assert len(list(backup_dir.glob("state_rm_*.json"))) == _MAX_BACKUPS
 
 
 # ===========================================================================
@@ -2943,3 +3082,80 @@ def test_state_mv_destination_name_containing_double_colon(
     remaining = call_args.deployment["resources"]
     rg = [r for r in remaining if r.get("type") == "azure-native:resources:ResourceGroup"][0]
     assert rg["urn"].endswith("azure-native:resources:ResourceGroup::new::rg")
+
+
+# ---------------------------------------------------------------------------
+# Hostile-repo hardening: symlink loops and deeply nested JSON
+# ---------------------------------------------------------------------------
+
+
+def _raise_on_symlink_resolve(monkeypatch) -> None:
+    """Make Path.resolve() raise on symlinks, mimicking Python 3.10-3.12 loops."""
+    from pathlib import Path
+
+    orig_resolve = Path.resolve
+
+    def fake_resolve(self, *a, **k):
+        if self.is_symlink():
+            raise RuntimeError(f"Symlink loop from {self}")
+        return orig_resolve(self, *a, **k)
+
+    monkeypatch.setattr(Path, "resolve", fake_resolve)
+
+
+def test_state_push_source_symlink_loop_clean_error(tmp_path, monkeypatch):
+    """A symlink-loop source path yields a clean WorkspaceError, not a raw
+    RuntimeError from Path.resolve() (Python 3.10-3.12 raise on loops)."""
+    link = tmp_path / "link_state.json"
+    link.symlink_to(link)  # self-referential loop
+    _raise_on_symlink_resolve(monkeypatch)
+
+    with pytest.raises(WorkspaceError, match="State file is a symlink"):
+        run_state_push(str(link), auto_approve=True)
+
+
+@patch("tlumi.commands.state.get_stack")
+@patch("tlumi.commands.state.load_config")
+@patch("tlumi.commands.state.find_project_dir")
+def test_state_rm_backups_symlink_loop_clean_error(
+    mock_find, mock_config, mock_get_stack, tmp_path, monkeypatch
+):
+    """A symlink-loop .tlumi/backups yields a clean WorkspaceError, not a raw
+    RuntimeError from Path.resolve()."""
+    config = MagicMock()
+    config.tlumi_dir = tmp_path / ".tlumi"
+    config.tlumi_dir.mkdir()
+    mock_config.return_value = config
+
+    stack_resource = {
+        "urn": "urn:pulumi:default::myproj::pulumi:pulumi:Stack::myproj-default",
+        "type": "pulumi:pulumi:Stack",
+    }
+    target = {
+        "urn": "urn:pulumi:default::myproj::aws:s3:BucketV2::my-bucket",
+        "type": "aws:s3:BucketV2",
+        "id": "b-123",
+        "inputs": {},
+        "outputs": {},
+    }
+    mock_stack = MagicMock(spec=Stack)
+    mock_stack.export_stack.return_value = mock_state([stack_resource, target], version=3)
+    mock_get_stack.return_value = mock_stack
+
+    backups = config.tlumi_dir / "backups"
+    backups.symlink_to(backups)  # self-referential loop
+    _raise_on_symlink_resolve(monkeypatch)
+
+    with pytest.raises(WorkspaceError, match="backups is a symlink"):
+        run_state_rm("my-bucket", auto_approve=True)
+
+
+def test_state_push_deeply_nested_json_clean_error(tmp_path):
+    """A pathologically nested JSON source file yields a clean WorkspaceError
+    (json.loads raises RecursionError, not JSONDecodeError), not a traceback."""
+    deep = "[" * 100000 + "]" * 100000
+    state_file = tmp_path / "deep.json"
+    state_file.write_text(deep)
+
+    with pytest.raises(WorkspaceError, match="Invalid JSON"):
+        run_state_push(str(state_file), auto_approve=True)

@@ -50,6 +50,34 @@ def _sanitize_value(value: object, _depth: int = 0) -> object:
     return value
 
 
+def _contains_secret_sentinel(value: object, _depth: int = 0) -> bool:
+    """True when a Pulumi secret sentinel appears anywhere in ``value``.
+
+    Real preview events scrub every secret input to a BYTE-IDENTICAL wrapper
+    (``{<sig>: <magic>, "ciphertext": "[secret]"}``) on both the old and new
+    side even when the engine reports the value changed, so neither raw nor
+    sanitized comparison can detect the change. Diff extraction uses this to
+    know it must fall back to the engine's own diff signal and still surface
+    the secret (masked) rather than dropping it as a no-op. Returns True at
+    the depth limit as the conservative default: surfacing a masked value is
+    safe, silently dropping a real secret change is the bug.
+    """
+    if _depth >= _MAX_DEPTH:
+        return True
+    if isinstance(value, dict):
+        if value.get(_PULUMI_SECRET_SIG) == _PULUMI_SECRET_VALUE:
+            return True
+        return any(_contains_secret_sentinel(v, _depth + 1) for v in value.values())
+    if isinstance(value, list):
+        return any(_contains_secret_sentinel(v, _depth + 1) for v in value)
+    if isinstance(value, str):
+        # Defense in depth, mirroring _sanitize_value: the sig may survive
+        # inside a leaf string (embedded JSON) even when the wrapper-dict form
+        # is lost, and a bare "[secret]" is Pulumi's scrubbed ciphertext.
+        return _PULUMI_SECRET_SIG in value or value == "[secret]"
+    return False
+
+
 def _unwrap_secrets(value: object, _depth: int = 0) -> object:
     """Recursively replace secret wrapper dicts with their decoded plaintext.
 
@@ -78,7 +106,10 @@ def _unwrap_secrets(value: object, _depth: int = 0) -> object:
             return _SENSITIVE_MARKER
         try:
             decoded = json.loads(plaintext)
-        except ValueError:
+        except (ValueError, RecursionError):
+            # RecursionError: a pathologically nested plaintext string (e.g. an
+            # attacker-shipped .tlumi/) is treated like any other undecodable
+            # plaintext instead of crashing the command.
             return plaintext
         return _unwrap_secrets(decoded, _depth + 1)
     if isinstance(value, dict):

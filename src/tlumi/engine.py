@@ -23,7 +23,7 @@ from rich.live import Live
 from rich.markup import escape
 from rich.text import Text
 
-from tlumi.diffs import PropertyChange, extract_property_diffs
+from tlumi.diffs import PropertyChange, _deep_equal, extract_property_diffs
 from tlumi.display import LiveDisplay, WindowLiveProxy, _get_active_window, console
 from tlumi.errors import Diagnostic, EngineError
 from tlumi.redact import redact_text
@@ -446,7 +446,10 @@ class EventHandler:
             if meta.type == "pulumi:pulumi:Stack":
                 old_outputs = (getattr(meta.old, "outputs", None) if meta.old else None) or {}
                 new_outputs = (getattr(meta.new, "outputs", None) if meta.new else None) or {}
-                if new_outputs != old_outputs:
+                # _deep_equal, not !=: Python's cross-type equality (True == 1,
+                # 1 == 1.0) would hide an output-only change between forms that
+                # serialize differently, wrongly reporting "No changes".
+                if not _deep_equal(new_outputs, old_outputs):
                     self._stack_outputs_changed = True
                 if _contains_secret_wrapper(old_outputs) or _contains_secret_wrapper(new_outputs):
                     self._stack_outputs_contain_secrets = True

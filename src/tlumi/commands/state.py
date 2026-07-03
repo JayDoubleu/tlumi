@@ -27,7 +27,7 @@ from tlumi.display import (
 from tlumi.errors import WorkspaceError
 from tlumi.redact import redact_text
 from tlumi.resolve import display_from_urn, name_from_urn, resolve_resource
-from tlumi.workspace import get_stack, safe_export_stack
+from tlumi.workspace import export_stack_no_secrets, get_stack, safe_export_stack
 
 _log = logging.getLogger(__name__)
 
@@ -84,7 +84,7 @@ def _write_secure(path: Path, data: dict) -> None:
         json.dump(data, f, indent=2)
 
 
-def _create_backup(config, op: str, deployment_version, deployment) -> tuple[str, str]:
+def _create_backup(config, op: str, stack) -> tuple[str, str]:
     """Create a timestamped backup of state for a mutating operation.
 
     Returns (timestamp, relative_path). ``op`` is the short operation name
@@ -92,11 +92,20 @@ def _create_backup(config, op: str, deployment_version, deployment) -> tuple[str
     Centralizes: symlink guard on backups/, mkdir with 0o700, secure write
     with O_CREAT|O_EXCL, per-op rotation. Replaces three near-identical
     blocks in run_state_rm / run_state_mv / run_state_push.
+
+    The backup is sourced from ``export_stack_no_secrets(stack)`` (a plain
+    ``pulumi stack export``), NOT from the ``safe_export_stack`` deployment the
+    callers already hold: that one is decrypted (the SDK hardcodes
+    ``--show-secrets``), so writing it here would drop plaintext copies of every
+    secret onto disk even when TLUMI_SECRETS_PASSPHRASE is set. Ciphertext
+    restores identically (the salt lives in ``deployment.secrets_providers`` and
+    ``state push`` requires the same passphrase). Exported fresh here so the
+    ciphertext snapshot reflects the pre-mutation on-disk state.
     """
     backup_dir = config.tlumi_dir / "backups"
     if backup_dir.is_symlink():
         raise WorkspaceError(
-            f"backups is a symlink to {backup_dir.resolve()}",
+            f"backups is a symlink to {os.readlink(backup_dir)}",
             hint="Remove the symlink. A malicious repository may have created it.",
         )
     try:
@@ -106,11 +115,15 @@ def _create_backup(config, op: str, deployment_version, deployment) -> tuple[str
             f"Cannot create backup directory: {e}",
             hint="Check disk space and directory permissions.",
         ) from e
+    encrypted = export_stack_no_secrets(stack)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     op_prefix = f"state_{op}_"
     backup_path = backup_dir / f"{op_prefix}{timestamp}.json"
     try:
-        _write_secure(backup_path, {"version": deployment_version, "deployment": deployment or {}})
+        _write_secure(
+            backup_path,
+            {"version": encrypted.version, "deployment": encrypted.deployment or {}},
+        )
     except OSError as e:
         raise WorkspaceError(
             f"Failed to create backup: {e}",
@@ -298,7 +311,7 @@ def run_state_rm(resource: str, auto_approve: bool = False) -> None:
             return
 
     # Backup state before modification
-    _, backup_rel = _create_backup(config, "rm", state.version, state.deployment)
+    _, backup_rel = _create_backup(config, "rm", stack)
     console.print(f"  [muted]State backed up to {backup_rel}[/muted]")
 
     # Walk all resources, remove the target, and clean up five reference types
@@ -467,7 +480,7 @@ def run_state_mv(source: str, destination: str, auto_approve: bool = False) -> N
             return
 
     # Backup state before modification
-    _, backup_rel = _create_backup(config, "mv", state.version, state.deployment)
+    _, backup_rel = _create_backup(config, "mv", stack)
     console.print(f"  [muted]State backed up to {backup_rel}[/muted]")
 
     # Walk all resources and rewrite URN references
@@ -582,7 +595,7 @@ def run_state_push(file_path: str, auto_approve: bool = False, json_output: bool
         # read process env / SSH keys / arbitrary host files, and the error
         # would surface as a confusing JSON-decode failure.
         raise WorkspaceError(
-            f"State file is a symlink to {path.resolve()}",
+            f"State file is a symlink to {os.readlink(path)}",
             hint="Pass the resolved path directly, or remove the symlink.",
         )
     if not path.is_absolute():
@@ -643,6 +656,14 @@ def run_state_push(file_path: str, auto_approve: bool = False, json_output: bool
     except json.JSONDecodeError as e:
         raise WorkspaceError(
             f"Invalid JSON in {file_path}: {e}",
+            hint="Use 'tlumi state pull' to export a valid state file.",
+        ) from e
+    except RecursionError as e:
+        # A pathologically nested JSON file exceeds CPython's json recursion
+        # limit; treat it as invalid input rather than crashing with a raw
+        # traceback.
+        raise WorkspaceError(
+            f"Invalid JSON in {file_path}: nesting is too deep.",
             hint="Use 'tlumi state pull' to export a valid state file.",
         ) from e
 
@@ -843,7 +864,7 @@ def run_state_push(file_path: str, auto_approve: bool = False, json_output: bool
             return
 
     # Backup current state
-    _, backup_rel = _create_backup(config, "push", current_state.version, current_state.deployment)
+    _, backup_rel = _create_backup(config, "push", stack)
 
     if not json_output:
         console.print(f"  [muted]State backed up to {backup_rel}[/muted]")

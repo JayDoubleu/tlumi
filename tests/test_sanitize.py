@@ -233,3 +233,12 @@ def test_unwrap_at_max_depth_returns_value_unchanged():
         inner = inner["nested"]
     # At the cap the wrapper survives untouched (helper is not a mask).
     assert inner == {"nested": wrapped}
+
+
+def test_unwrap_deeply_nested_plaintext_returns_raw_string():
+    """A pathologically nested plaintext (attacker-shipped state) makes
+    json.loads raise RecursionError; the helper treats it like any other
+    undecodable plaintext and returns the raw string instead of crashing."""
+    deep = "[" * 100000 + "]" * 100000
+    wrapped = _wrapper(plaintext=deep)
+    assert _unwrap_secrets(wrapped) == deep

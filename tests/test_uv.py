@@ -645,3 +645,82 @@ def test_download_uv_cleans_temp_on_replace_failure(tmp_path):
 
     assert not (dest / "uv").exists()  # cache not poisoned
     assert list(dest.glob("uv.*.tmp")) == []  # temp cleaned up
+
+
+# ---------------------------------------------------------------------------
+# http.client.HTTPException (IncompleteRead) is not an OSError subclass, so a
+# connection dropped mid-body must still surface as WorkspaceError, not a raw
+# traceback.
+# ---------------------------------------------------------------------------
+
+
+def test_verify_checksum_incomplete_read_raises_workspace_error(tmp_path):
+    """A connection dropped mid-body while reading the .sha256 file (IncompleteRead)
+    surfaces as WorkspaceError and deletes the archive (docstring cleanup contract)."""
+    import http.client
+
+    archive = tmp_path / "test.tar.gz"
+    archive.write_bytes(b"hello world")
+
+    with patch("urllib.request.urlopen") as mock_urlopen:
+        mock_response = mock_urlopen.return_value.__enter__.return_value
+        mock_response.read.side_effect = http.client.IncompleteRead(b"partial", 90)
+        with pytest.raises(WorkspaceError, match="Failed to download checksum file"):
+            _verify_checksum("https://example.com/test.tar.gz", archive, "test.tar.gz")
+    assert not archive.exists()
+
+
+def test_download_uv_incomplete_read_raises_workspace_error(tmp_path):
+    """A connection dropped mid-body while downloading the archive (IncompleteRead)
+    surfaces as WorkspaceError and leaves no archive behind."""
+    import http.client
+
+    dest = tmp_path / "dest"
+    target = "x86_64-unknown-linux-gnu"
+
+    with (
+        patch("tlumi.uv._platform_target", return_value=target),
+        patch("urllib.request.urlopen") as mock_urlopen,
+    ):
+        response = mock_urlopen.return_value.__enter__.return_value
+        response.read.side_effect = http.client.IncompleteRead(b"", 100)
+        with pytest.raises(WorkspaceError, match="Failed to download uv"):
+            _download_uv(dest)
+
+    assert list(dest.glob("*.tmp")) == []
+
+
+# ---------------------------------------------------------------------------
+# Concurrent first-run downloads must use a pid-unique archive path so they do
+# not truncate each other (which would trip a false checksum mismatch).
+# ---------------------------------------------------------------------------
+
+
+def test_download_uv_archive_path_is_pid_unique(tmp_path):
+    """The downloaded archive lands at a pid-unique path, not the shared
+    dest/filename, so parallel first-run downloads do not collide."""
+    dest = tmp_path / "dest"
+    target = "x86_64-unknown-linux-gnu"
+    archive_bytes = _make_uv_archive(target)
+
+    captured: dict[str, Path] = {}
+    real_open = tarfile.open
+
+    def spy_open(path, *args, **kwargs):
+        captured["path"] = Path(path)
+        return real_open(path, *args, **kwargs)
+
+    def fake_urlopen(url, **kwargs):
+        return io.BytesIO(archive_bytes)
+
+    with (
+        patch("tlumi.uv._platform_target", return_value=target),
+        patch("urllib.request.urlopen", side_effect=fake_urlopen),
+        patch("tlumi.uv._verify_checksum"),
+        patch("tlumi.uv.os.getpid", return_value=99999),
+        patch("tlumi.uv.tarfile.open", side_effect=spy_open),
+    ):
+        _download_uv(dest)
+
+    assert "99999" in captured["path"].name
+    assert captured["path"] != dest / f"uv-{target}.tar.gz"

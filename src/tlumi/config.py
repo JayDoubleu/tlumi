@@ -140,6 +140,27 @@ _NON_DECIMAL_INT_TAG = "!tlumi/non-decimal-int"
 # _NON_DECIMAL_INT_TAG below.
 _DECIMAL_INT_RE = re.compile(r"^(?:0|-?[1-9][0-9]*)\Z")
 
+_YAML_BOOL_TAG = "tag:yaml.org,2002:bool"
+_NON_CANONICAL_BOOL_TAG = "!tlumi/non-canonical-bool"
+# YAML 1.1 also resolves yes/no/on/off (and case variants) to booleans, so an
+# unquoted ISO country code ``NO`` or literal ``on`` is silently rewritten to a
+# different string ('false'/'true') -- the classic "Norway problem". Only the
+# true/false word forms round-trip to the documented lowercase spelling; the
+# rest are remapped to _NON_CANONICAL_BOOL_TAG so the coercion step can reject
+# them with a quote hint.
+_CANONICAL_BOOL_RE = re.compile(r"^(?:true|True|TRUE|false|False|FALSE)\Z")
+
+_YAML_FLOAT_TAG = "tag:yaml.org,2002:float"
+_FLOAT_TEXT_TAG = "!tlumi/float-text"
+_YAML_TIMESTAMP_TAG = "tag:yaml.org,2002:timestamp"
+_TIMESTAMP_TEXT_TAG = "!tlumi/timestamp-text"
+# Floats and timestamps are always rejected (both are lossy-rewrite classes:
+# ``1.10`` -> 1.1, ``2026-07-02T10:00:00Z`` -> a datetime whose str() drops the
+# 'T'/'Z' form), so every match is retagged to a raw-text marker rather than
+# split into a round-tripping subset. Retagging timestamps also stops PyYAML's
+# timestamp constructor from raising a bare ValueError on out-of-range implicit
+# dates (e.g. ``2026-13-01``).
+
 
 class _NonDecimalIntText(str):
     """Raw text of a YAML 1.1 int form that does not round-trip.
@@ -153,6 +174,44 @@ class _NonDecimalIntText(str):
     the value the user actually wrote. Subclassing ``str`` keeps non-variable
     config fields (which validate against ``str``) behaving sensibly for
     these scalars.
+    """
+
+    __slots__ = ()
+
+
+class _NonCanonicalBoolText(str):
+    """Raw text of a YAML 1.1 bool spelling that is not canonical true/false.
+
+    PyYAML resolves ``yes``/``no``/``on``/``off`` (and case variants) to
+    booleans, so an ISO country code ``NO`` or a literal ``on`` would silently
+    become 'false'/'true'. The strict loader preserves the original text here so
+    ``_coerce_variable_value`` can reject it with a hint quoting what the user
+    wrote. Subclassing ``str`` keeps non-variable config fields sensible.
+    """
+
+    __slots__ = ()
+
+
+class _FloatText(str):
+    """Raw text of a YAML float scalar.
+
+    Floats are always rejected because YAML silently rewrites ``1.10`` to
+    ``1.1``. Carrying the raw source text (rather than the parsed float) lets the
+    rejection quote what the user actually wrote instead of the corrupted value,
+    matching the ``_NonDecimalIntText`` treatment on the int side.
+    """
+
+    __slots__ = ()
+
+
+class _TimestampText(str):
+    """Raw text of a YAML timestamp scalar.
+
+    PyYAML resolves ``2026-07-02T10:00:00Z`` to a datetime whose str() drops the
+    'T'/'Z' form and zero-pads fractional seconds. Preserving the raw text lets
+    the coercion step reject it with a hint quoting the exact source, and it also
+    keeps out-of-range implicit dates (month 13) from raising a bare ValueError
+    inside PyYAML's timestamp constructor.
     """
 
     __slots__ = ()
@@ -174,16 +233,43 @@ def _construct_non_decimal_int(
     return _NonDecimalIntText(node.value)
 
 
+def _construct_non_canonical_bool(
+    loader: yaml.SafeLoader, node: yaml.ScalarNode
+) -> _NonCanonicalBoolText:
+    return _NonCanonicalBoolText(node.value)
+
+
+def _construct_float_text(loader: yaml.SafeLoader, node: yaml.ScalarNode) -> _FloatText:
+    return _FloatText(node.value)
+
+
+def _construct_timestamp_text(loader: yaml.SafeLoader, node: yaml.ScalarNode) -> _TimestampText:
+    return _TimestampText(node.value)
+
+
 _StrictIntLoader.add_constructor(_NON_DECIMAL_INT_TAG, _construct_non_decimal_int)
+_StrictIntLoader.add_constructor(_NON_CANONICAL_BOOL_TAG, _construct_non_canonical_bool)
+_StrictIntLoader.add_constructor(_FLOAT_TEXT_TAG, _construct_float_text)
+_StrictIntLoader.add_constructor(_TIMESTAMP_TEXT_TAG, _construct_timestamp_text)
 
 
-def _build_strict_int_resolvers() -> dict[str | None, list[tuple[str, re.Pattern[str]]]]:
-    """Copy SafeLoader's implicit resolvers, splitting the int resolver in two.
+def _build_strict_resolvers() -> dict[str | None, list[tuple[str, re.Pattern[str]]]]:
+    """Copy SafeLoader's implicit resolvers, hardening the lossy YAML 1.1 rules.
 
-    The stock int entry is replaced in place by a strict decimal resolver
-    (still tagged as int) followed by the original YAML 1.1 regex retagged as
-    ``_NON_DECIMAL_INT_TAG``, so anything the stock loader would have made an
-    int is guaranteed to hit one of the two.
+    Four scalar resolvers whose implicit coercion silently rewrites the source
+    text are split or retagged so ``_coerce_variable_value`` sees a raw-text
+    marker it can reject:
+
+    * int: only round-tripping decimals (``_DECIMAL_INT_RE``) stay ints; the
+      remaining forms (octal, hex, sexagesimal, ``+7``) retag to
+      ``_NON_DECIMAL_INT_TAG``.
+    * bool: only ``true``/``false`` word forms stay bools; yes/no/on/off retag to
+      ``_NON_CANONICAL_BOOL_TAG``.
+    * float and timestamp: every match retags to a raw-text tag (both are always
+      rejected, so no round-tripping subset needs to stay parsed).
+
+    Resolver order is preserved exactly, so anything the stock loader matched
+    still hits one of the rebuilt entries.
     """
     resolvers: dict[str | None, list[tuple[str, re.Pattern[str]]]] = {}
     for first_char, pairs in yaml.SafeLoader.yaml_implicit_resolvers.items():
@@ -192,13 +278,20 @@ def _build_strict_int_resolvers() -> dict[str | None, list[tuple[str, re.Pattern
             if tag == _YAML_INT_TAG:
                 rebuilt.append((_YAML_INT_TAG, _DECIMAL_INT_RE))
                 rebuilt.append((_NON_DECIMAL_INT_TAG, regexp))
+            elif tag == _YAML_BOOL_TAG:
+                rebuilt.append((_YAML_BOOL_TAG, _CANONICAL_BOOL_RE))
+                rebuilt.append((_NON_CANONICAL_BOOL_TAG, regexp))
+            elif tag == _YAML_FLOAT_TAG:
+                rebuilt.append((_FLOAT_TEXT_TAG, regexp))
+            elif tag == _YAML_TIMESTAMP_TAG:
+                rebuilt.append((_TIMESTAMP_TEXT_TAG, regexp))
             else:
                 rebuilt.append((tag, regexp))
         resolvers[first_char] = rebuilt
     return resolvers
 
 
-_StrictIntLoader.yaml_implicit_resolvers = _build_strict_int_resolvers()
+_StrictIntLoader.yaml_implicit_resolvers = _build_strict_resolvers()
 
 
 def _load_yaml(text: str) -> object:
@@ -206,6 +299,35 @@ def _load_yaml(text: str) -> object:
     # _StrictIntLoader subclasses yaml.SafeLoader, so this is exactly as safe
     # as yaml.safe_load(); bandit only pattern-matches the yaml.load call.
     return yaml.load(text, Loader=_StrictIntLoader)  # nosec B506
+
+
+_STRICT_MARKERS = (_NonCanonicalBoolText, _NonDecimalIntText, _FloatText, _TimestampText)
+
+
+def _canonical_value(value: object) -> object:
+    """Undo the strict loader's raw-text markers for non-variable config fields.
+
+    The strict loader deliberately surfaces lossy YAML 1.1 scalars
+    (``yes``/``no``/``on``/``off``, non-decimal ints, floats, timestamps) as
+    str-subclass markers so ``_coerce_variable_value`` can reject them. Those
+    markers are meant for variable *values* only. If one reaches a typed config
+    field (``project.name``/``entry``, ``backend.url``, ``secrets.*``) it would
+    either slip past an ``isinstance(str)`` check (the markers subclass ``str``)
+    or surface the internal marker class name in a user-facing error. Re-resolve
+    the raw text through the stock SafeLoader so those fields see the ordinary
+    Python type the pre-strict-loader code produced (``yes`` -> True, ``0777``
+    -> 511, ``1.10`` -> 1.1, a timestamp -> datetime), keeping their existing
+    boolean/string validation intact. A scalar that cannot be reconstructed
+    (e.g. an out-of-range implicit date) falls back to its raw text rather than
+    raising, so this never reintroduces the bare-ValueError crash the strict
+    loader was added to prevent.
+    """
+    if isinstance(value, _STRICT_MARKERS):
+        try:
+            return yaml.safe_load(str(value))
+        except (yaml.YAMLError, ValueError, RecursionError):
+            return str(value)
+    return value
 
 
 def _warn_unknown_keys(mapping: dict, known: tuple[str, ...], section: str) -> None:
@@ -234,11 +356,26 @@ def _coerce_variable_value(key: str, value: object, source: str) -> str:
     values. Int forms whose text does not round-trip (``0777`` -> 511, ``1:30``
     -> 90, ``0x1A`` -> 26, ``+7`` -> 7, ``-0`` -> 0) are the same lossy-rewrite
     class; the strict loader preserves their raw text as ``_NonDecimalIntText``
-    and they are rejected here with a quote hint. Lists/dicts and bare/null
-    values are rejected as before.
+    and they are rejected here with a quote hint. YAML 1.1 boolean keywords
+    (``yes``/``no``/``on``/``off``, the "Norway problem") and timestamps
+    (``2026-07-02T10:00:00Z`` reformatted) are the same class and are likewise
+    rejected via their raw-text markers. Lists/dicts, bare/null values, and
+    embedded NUL bytes (which would crash the Pulumi CLI subprocess) are
+    rejected too.
     """
+    if "\x00" in key:
+        raise ConfigError(
+            f"A variable key in {source} contains a NUL byte.",
+            hint="Remove the embedded NUL (\\0); it cannot be passed to Pulumi.",
+        )
     if isinstance(value, bool):
         return "true" if value else "false"
+    if isinstance(value, _NonCanonicalBoolText):
+        raise ConfigError(
+            f"Variable '{key}' in {source} is an unquoted YAML boolean keyword ({value}); "
+            "YAML 1.1 rewrites yes/no/on/off to true/false.",
+            hint=f'Quote it to preserve the exact text, e.g. {key}: "{value}".',
+        )
     if isinstance(value, (list, dict)):
         raise ConfigError(
             f"Variable '{key}' in {source} must be a scalar value, not {type(value).__name__}.",
@@ -248,10 +385,22 @@ def _coerce_variable_value(key: str, value: object, source: str) -> str:
             f"Variable '{key}' in {source} has no value.",
             hint='Remove the key or give it an explicit value (use "" for empty).',
         )
+    if isinstance(value, _FloatText):
+        raise ConfigError(
+            f"Variable '{key}' in {source} is an unquoted decimal ({value}); "
+            "YAML silently rewrites values like 1.10 to 1.1.",
+            hint=f'Quote it to preserve the exact text, e.g. {key}: "{value}".',
+        )
     if isinstance(value, float):
         raise ConfigError(
             f"Variable '{key}' in {source} is an unquoted decimal ({value!r}); "
             "YAML silently rewrites values like 1.10 to 1.1.",
+            hint=f'Quote it to preserve the exact text, e.g. {key}: "{value!r}".',
+        )
+    if isinstance(value, _TimestampText):
+        raise ConfigError(
+            f"Variable '{key}' in {source} is an unquoted timestamp ({value}); "
+            "YAML silently reformats dates (the 'T'/'Z' form and fractional seconds change).",
             hint=f'Quote it to preserve the exact text, e.g. {key}: "{value}".',
         )
     if isinstance(value, _NonDecimalIntText):
@@ -260,6 +409,11 @@ def _coerce_variable_value(key: str, value: object, source: str) -> str:
             f"round-trip ({value}); YAML silently rewrites values like 0777 to 511, "
             "1:30 to 90, and +7 to 7.",
             hint=f'Quote it to preserve the exact text, e.g. {key}: "{value}".',
+        )
+    if isinstance(value, str) and "\x00" in value:
+        raise ConfigError(
+            f"Variable '{key}' in {source} contains a NUL byte.",
+            hint="Remove the embedded NUL (\\0); it cannot be passed to Pulumi.",
         )
     return str(value)
 
@@ -281,7 +435,11 @@ def load_config(project_dir: Path | None = None) -> ProjectConfig:
 
     try:
         raw = _load_yaml(config_path.read_text()) or {}
-    except (yaml.YAMLError, OSError, UnicodeDecodeError) as e:
+    except (yaml.YAMLError, OSError, UnicodeDecodeError, ValueError, RecursionError) as e:
+        # PyYAML raises bare ValueError from its timestamp constructor (an
+        # explicit "!!timestamp 2026-13-01") and RecursionError on deeply nested
+        # documents; neither is a yaml.YAMLError, so widen the catch to keep them
+        # from escaping as raw tracebacks (and breaking the --json contract).
         raise ConfigError(f"Cannot read tlumi.yaml: {e}") from e
 
     if not isinstance(raw, dict):
@@ -297,7 +455,7 @@ def load_config(project_dir: Path | None = None) -> ProjectConfig:
         raise ConfigError("'project' must be a mapping in tlumi.yaml.")
     _warn_unknown_keys(project, _KNOWN_PROJECT_KEYS, "'project'")
 
-    name = project.get("name")
+    name = _canonical_value(project.get("name"))
     if not name:
         raise ConfigError(
             "Missing 'project.name' in tlumi.yaml.",
@@ -325,7 +483,7 @@ def load_config(project_dir: Path | None = None) -> ProjectConfig:
         raise ConfigError("'secrets' must be a mapping in tlumi.yaml.")
     _warn_unknown_keys(secrets_raw, _KNOWN_SECRETS_KEYS, "'secrets'")
 
-    entry = project.get("entry", DEFAULT_ENTRY)
+    entry = _canonical_value(project.get("entry", DEFAULT_ENTRY))
     if not isinstance(entry, str):
         raise ConfigError(
             f"'project.entry' must be a string, got {type(entry).__name__}.",
@@ -350,6 +508,11 @@ def load_config(project_dir: Path | None = None) -> ProjectConfig:
         raise ConfigError("'variables' must be a mapping in tlumi.yaml.")
     variables: dict[str, str] = {}
     for k, v in raw_variables.items():
+        if type(k) is not str:
+            raise ConfigError(
+                f"Variable key '{k}' in tlumi.yaml must be a quoted string.",
+                hint=f'YAML coerced it from a keyword/number; quote it, e.g. "{k}": value.',
+            )
         key_str = str(k)
         if ":" in key_str:
             raise ConfigError(
@@ -358,21 +521,21 @@ def load_config(project_dir: Path | None = None) -> ProjectConfig:
             )
         variables[key_str] = _coerce_variable_value(key_str, v, "tlumi.yaml")
 
-    allow_unencrypted = secrets_raw.get("allow_unencrypted", False)
+    allow_unencrypted = _canonical_value(secrets_raw.get("allow_unencrypted", False))
     if not isinstance(allow_unencrypted, bool):
         raise ConfigError(
             "'secrets.allow_unencrypted' must be a boolean,"
             f" got {type(allow_unencrypted).__name__}.",
             hint="Use 'true' or 'false' (unquoted) in YAML, not a string like '\"false\"'.",
         )
-    warn_unencrypted = secrets_raw.get("warn_unencrypted", True)
+    warn_unencrypted = _canonical_value(secrets_raw.get("warn_unencrypted", True))
     if not isinstance(warn_unencrypted, bool):
         raise ConfigError(
             f"'secrets.warn_unencrypted' must be a boolean, got {type(warn_unencrypted).__name__}.",
             hint="Use 'true' or 'false' (unquoted) in YAML, not a string like '\"false\"'.",
         )
 
-    backend_url = backend_raw.get("url")
+    backend_url = _canonical_value(backend_raw.get("url"))
     if backend_url is not None and not isinstance(backend_url, str):
         raise ConfigError(
             f"'backend.url' must be a string, got {type(backend_url).__name__}.",
@@ -424,11 +587,25 @@ def merge_variables(
             raise ConfigError(f"Variable file not found: {path}")
         try:
             data = _load_yaml(path.read_text())
-        except (yaml.YAMLError, OSError, UnicodeDecodeError) as e:
+        except (yaml.YAMLError, OSError, UnicodeDecodeError, ValueError, RecursionError) as e:
+            # Match load_config: PyYAML's timestamp constructor raises bare
+            # ValueError and deeply nested documents raise RecursionError,
+            # neither a yaml.YAMLError.
             raise ConfigError(f"Cannot read variable file {path}: {e}") from e
+        if data is None:
+            # An empty or comments-only var file means zero variables, mirroring
+            # the `_load_yaml(...) or {}` normalization used for tlumi.yaml and
+            # Terraform's acceptance of empty tfvars. A genuine non-dict document
+            # (scalar, list) is still rejected below.
+            data = {}
         if not isinstance(data, dict):
             raise ConfigError(f"Variable file must be a YAML mapping: {path}")
         for k, v in data.items():
+            if type(k) is not str:
+                raise ConfigError(
+                    f"Variable key '{k}' in {path} must be a quoted string.",
+                    hint=f'YAML coerced it from a keyword/number; quote it, e.g. "{k}": value.',
+                )
             key_str = str(k)
             if ":" in key_str:
                 raise ConfigError(

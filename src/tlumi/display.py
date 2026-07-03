@@ -58,7 +58,7 @@ tlumi_theme = Theme(
 class _TlumiConsole(Console):
     """Console whose EPIPE handling stays catchable by ``cli._run()``.
 
-    Rich >= 13.2 intercepts BrokenPipeError inside ``Console._check_buffer``
+    Rich >= 13.8 intercepts BrokenPipeError inside ``Console._check_buffer``
     and calls ``on_broken_pipe()``, whose default raises ``SystemExit(1)``,
     a BaseException that sails past ``_run()``'s BrokenPipeError handler and
     reproduces the silent exit 1 that handler exists to fix
@@ -68,8 +68,9 @@ class _TlumiConsole(Console):
     ``cli._run()`` decides the exit code. Non-main threads (the Live refresh
     thread, Pulumi event callbacks) keep Rich's SystemExit convention, which
     ``threading`` swallows silently; the muted console stops their writes and
-    the main thread still controls the process exit code. On Rich < 13.2 this
-    hook is never called and BrokenPipeError already propagates naturally.
+    the main thread still controls the process exit code. rich>=13.8.0 is a
+    hard floor (pyproject.toml) precisely because this hook must exist for the
+    exit-code guarantee to hold.
     """
 
     def on_broken_pipe(self) -> None:
@@ -617,7 +618,11 @@ def prompt(message: str, default: str = "") -> str:
         _window.pause()
     try:
         try:
-            return console.input(message)
+            # emoji=False: Console.input hard-defaults emoji=True, which would
+            # rewrite :shortcode: sequences in the prompt (e.g. a resource name
+            # like 'cache:wave:node') to an emoji, bypassing the console-level
+            # emoji=False invariant.
+            return console.input(message, emoji=False)
         except EOFError:
             return default
     finally:
@@ -641,7 +646,12 @@ def confirm(message: str) -> bool:
         _window.pause()
     try:
         try:
-            response = console.input(f"  {message} Type [bold]'yes'[/bold] to confirm: ")
+            # emoji=False: Console.input hard-defaults emoji=True and would
+            # rewrite :shortcode: sequences in the interpolated resource name to
+            # an emoji, misrendering the identity in a destructive confirmation.
+            response = console.input(
+                f"  {message} Type [bold]'yes'[/bold] to confirm: ", emoji=False
+            )
         except EOFError as e:
             raise TlumiError(
                 "Cannot prompt for confirmation: stdin is not a terminal.",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -42,7 +43,7 @@ def run_init(project_dir: Path | None = None, name: str | None = None) -> None:
 
     if tlumi_dir.is_symlink():
         raise ConfigError(
-            f".tlumi is a symlink to {tlumi_dir.resolve()}",
+            f".tlumi is a symlink to {os.readlink(tlumi_dir)}",
             hint="Remove the symlink before initializing. "
             "A malicious repository may have created it.",
         )
@@ -172,7 +173,7 @@ def run_init(project_dir: Path | None = None, name: str | None = None) -> None:
             config_path = project_dir / CONFIG_FILE
             if config_path.is_symlink():
                 raise ConfigError(
-                    f"{CONFIG_FILE} is a symlink to {config_path.resolve()}",
+                    f"{CONFIG_FILE} is a symlink to {os.readlink(config_path)}",
                     hint="Remove the symlink before initializing. "
                     "A malicious repository may have created it.",
                 )
@@ -182,7 +183,7 @@ def run_init(project_dir: Path | None = None, name: str | None = None) -> None:
             infra_path = project_dir / "infra.py"
             if infra_path.is_symlink():
                 raise ConfigError(
-                    f"infra.py is a symlink to {infra_path.resolve()}",
+                    f"infra.py is a symlink to {os.readlink(infra_path)}",
                     hint="Remove the symlink before initializing. "
                     "A malicious repository may have created it.",
                 )
@@ -193,7 +194,7 @@ def run_init(project_dir: Path | None = None, name: str | None = None) -> None:
             req_path = project_dir / "requirements.txt"
             if req_path.is_symlink():
                 raise ConfigError(
-                    f"requirements.txt is a symlink to {req_path.resolve()}",
+                    f"requirements.txt is a symlink to {os.readlink(req_path)}",
                     hint="Remove the symlink before initializing. "
                     "A malicious repository may have created it.",
                 )

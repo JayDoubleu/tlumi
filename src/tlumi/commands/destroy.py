@@ -67,14 +67,11 @@ def run_destroy(
 
     if not raw_resources:
         if json_output:
-            print_json(
-                json.dumps(
-                    {
-                        "changes": {"create": 0, "update": 0, "replace": 0, "delete": 0},
-                        "duration": "0s",
-                    }
-                )
-            )
+            # Reuse format_engine_result so the empty-state envelope matches the
+            # normal-completion path exactly (always includes an "import" key,
+            # and "targets" when --target is active). A hand-built envelope would
+            # emit a different shape from the same command.
+            print_json(json.dumps(format_engine_result({}, "0s", targets=resolved_targets)))
             return
         console.print("  [muted]No resources to destroy.[/muted]")
         return

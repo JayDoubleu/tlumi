@@ -84,9 +84,12 @@ def run_output(
             # hard-wrap at width 80, injecting newlines into the captured value.
             # Composite values are emitted as compact JSON: str() would print
             # Python repr (single quotes), which is neither JSON nor
-            # shell-consumable. Scalars stay str() (a plain string must not
-            # gain JSON quotes in shell capture).
-            if isinstance(val, (dict, list)):
+            # shell-consumable. Booleans and None also use JSON so --raw agrees
+            # with the lowercase 'true'/'false'/'null' every other tlumi channel
+            # emits (str() would leak Python's 'True'/'False'/'None' repr).
+            # Plain strings stay str() (a string must not gain JSON quotes in
+            # shell capture).
+            if isinstance(val, (dict, list, bool)) or val is None:
                 rendered = json.dumps(val, separators=(",", ":"))
             else:
                 rendered = str(val)

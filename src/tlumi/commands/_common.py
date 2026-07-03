@@ -36,12 +36,16 @@ def setup_command(
     json_output: bool = False,
     banner: str | None = None,
     status_msg: str = "Analyzing infrastructure...",
+    reconcile_config: bool = True,
 ) -> SetupResult:
     """Consolidate the repeated config/stack/target setup across commands.
 
     Returns SetupResult; access fields by name. Tuple-unpacking was previously
     supported but silently dropped resolved_replace, so callers must use
     attribute access.
+
+    Pass reconcile_config=False for ``apply --plan`` so get_stack preserves the
+    plan-time stack config instead of removing plan-time variables.
     """
     config = load_config(find_project_dir())
     config = merge_variables(config, var=var, var_file=var_file, quiet=json_output)
@@ -51,7 +55,7 @@ def setup_command(
         console.print()
 
     with animated_status(f"  {status_msg}", quiet=json_output):
-        stack = get_stack(config, quiet=json_output)
+        stack = get_stack(config, quiet=json_output, reconcile_config=reconcile_config)
 
     resolved = None
     if target:

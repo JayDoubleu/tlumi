@@ -101,6 +101,46 @@ def test_destroy_empty_state_json(
     data = json.loads(output)
     assert data["changes"]["delete"] == 0
     assert data["duration"] == "0s"
+    # Empty-state envelope must match the normal-path shape (format_engine_result),
+    # which always includes an "import" key -- a strict JSON consumer must not see
+    # two different envelope shapes from the same command.
+    assert "import" in data["changes"]
+    assert data["changes"]["import"] == 0
+
+
+@patch("tlumi.commands.destroy.resolve_targets")
+@patch("tlumi.commands.destroy.safe_export_stack")
+@patch("tlumi.commands.destroy.get_stack")
+@patch("tlumi.commands.destroy.merge_variables")
+@patch("tlumi.commands.destroy.load_config")
+@patch("tlumi.commands.destroy.find_project_dir")
+def test_destroy_empty_state_json_targeted_includes_targets(
+    mock_find, mock_config, mock_merge, mock_get_stack, mock_export, mock_resolve, capsys
+):
+    """A targeted destroy on an empty stack still emits the 'targets' key.
+
+    resolve_targets passes full urn:pulumi: identifiers through unvalidated, so
+    the early return is reachable with --target active; the envelope must match
+    the normal path (which includes 'targets' when --target is set).
+    """
+    urn = "urn:pulumi:default::p::aws:s3:BucketV2::gone"
+    mock_get_stack.return_value = MagicMock(spec=Stack)
+    mock_resolve.return_value = [urn]
+    mock_export.return_value = mock_state(
+        resources=[
+            {
+                "type": "pulumi:pulumi:Stack",
+                "urn": "urn:pulumi:default::p::pulumi:pulumi:Stack::p-default",
+            },
+        ]
+    )
+
+    run_destroy(auto_approve=True, json_output=True, target=[urn])
+
+    output = capsys.readouterr().out
+    data = json.loads(output)
+    assert data["changes"]["import"] == 0
+    assert data["targets"] == [urn]
 
 
 @patch("tlumi.commands.destroy.confirm", return_value=True)

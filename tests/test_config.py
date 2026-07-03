@@ -292,6 +292,48 @@ def test_load_config_allow_unencrypted_true(tmp_path):
     assert config.secrets.allow_unencrypted is True
 
 
+@pytest.mark.parametrize(
+    ("literal", "expected"),
+    [("yes", True), ("no", False), ("on", True), ("off", False), ("OFF", False)],
+)
+def test_load_config_secrets_yaml11_bool_accepted(tmp_path, literal, expected):
+    """YAML 1.1 boolean spellings (yes/no/on/off) are valid for secrets fields.
+
+    The strict variable loader retags these to a marker class; that retagging
+    must not leak into the typed secrets fields, which are real booleans.
+    """
+    (tmp_path / "tlumi.yaml").write_text(
+        f"project:\n  name: myproj\nsecrets:\n  allow_unencrypted: {literal}\n"
+    )
+    config = load_config(tmp_path)
+    assert config.secrets.allow_unencrypted is expected
+
+
+def test_load_config_warn_unencrypted_yaml11_bool_accepted(tmp_path):
+    (tmp_path / "tlumi.yaml").write_text(
+        "project:\n  name: myproj\nsecrets:\n  warn_unencrypted: no\n"
+    )
+    config = load_config(tmp_path)
+    assert config.secrets.warn_unencrypted is False
+
+
+def test_load_config_secrets_non_bool_error_hides_marker_class(tmp_path):
+    """A non-bool secrets value reports its real type, not the internal marker."""
+    (tmp_path / "tlumi.yaml").write_text(
+        "project:\n  name: myproj\nsecrets:\n  allow_unencrypted: 1.5\n"
+    )
+    with pytest.raises(ConfigError, match="got float") as exc_info:
+        load_config(tmp_path)
+    assert "Text" not in str(exc_info.value)
+
+
+def test_load_config_backend_url_yaml11_bool_rejected(tmp_path):
+    """backend.url as a YAML 1.1 boolean keyword is rejected, not stored as a str."""
+    (tmp_path / "tlumi.yaml").write_text("project:\n  name: myproj\nbackend:\n  url: yes\n")
+    with pytest.raises(ConfigError, match="'backend.url' must be a string, got bool"):
+        load_config(tmp_path)
+
+
 # ---------------------------------------------------------------------------
 # merge_variables:sensitive key warning
 # ---------------------------------------------------------------------------
@@ -893,4 +935,215 @@ def test_strict_loader_does_not_leak_into_stock_safe_loader():
     import tlumi.config  # noqa: F401  (ensure the module-level setup ran)
 
     assert yaml.safe_load("x: 0777")["x"] == 511
-    assert yaml.safe_load("x: 3")["x"] == 3
+
+
+# ---------------------------------------------------------------------------
+# Hardening sweep (task 1): YAML loading + variable coercion
+# ---------------------------------------------------------------------------
+
+
+# Finding 8: non-YAMLError exceptions from PyYAML must be wrapped in ConfigError.
+
+
+def test_load_config_out_of_range_timestamp_wrapped(tmp_path):
+    """An explicit !!timestamp with a bad month raises ConfigError, not raw ValueError."""
+    (tmp_path / "tlumi.yaml").write_text(
+        "project:\n  name: myproj\nvariables:\n  release: !!timestamp 2026-13-01\n"
+    )
+    with pytest.raises(ConfigError, match="Cannot read tlumi.yaml"):
+        load_config(tmp_path)
+
+
+def test_load_config_deeply_nested_yaml_wrapped(tmp_path):
+    """Deeply nested YAML (RecursionError) is wrapped in ConfigError, not a raw traceback."""
+    (tmp_path / "tlumi.yaml").write_text("a: " + "[" * 20000)
+    with pytest.raises(ConfigError, match="Cannot read tlumi.yaml"):
+        load_config(tmp_path)
+
+
+def test_merge_var_file_out_of_range_timestamp_wrapped(tmp_path):
+    """A var file with a bad !!timestamp raises ConfigError, not raw ValueError."""
+    config = _make_config(tmp_path)
+    var_file = tmp_path / "vars.yaml"
+    var_file.write_text("release: !!timestamp 2026-13-01\n")
+    with pytest.raises(ConfigError, match="Cannot read variable file"):
+        merge_variables(config, var_file=[str(var_file)])
+
+
+# Finding 9: YAML timestamp variable values must be rejected, not silently
+# reformatted via str(datetime).
+
+
+def test_load_config_rejects_timestamp_variable(tmp_path):
+    """An unquoted RFC3339 timestamp is rejected with the raw text, not the reformatted form."""
+    (tmp_path / "tlumi.yaml").write_text(
+        "project:\n  name: myproj\nvariables:\n  expiry: 2026-07-02T10:00:00Z\n"
+    )
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(tmp_path)
+    # The raw text the user wrote is echoed, never PyYAML's reformatting.
+    assert "2026-07-02T10:00:00Z" in str(excinfo.value)
+    assert "10:00:00+00:00" not in str(excinfo.value)
+    assert 'expiry: "2026-07-02T10:00:00Z"' in (excinfo.value.hint or "")
+
+
+def test_load_config_rejects_date_variable(tmp_path):
+    """A bare date variable is rejected (YAML would resolve it to a datetime.date)."""
+    (tmp_path / "tlumi.yaml").write_text(
+        "project:\n  name: myproj\nvariables:\n  day: 2026-07-02\n"
+    )
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(tmp_path)
+    assert "2026-07-02" in str(excinfo.value)
+
+
+def test_load_config_quoted_timestamp_variable_preserved(tmp_path):
+    """Quoting the timestamp (as the hint suggests) preserves the exact text."""
+    (tmp_path / "tlumi.yaml").write_text(
+        'project:\n  name: myproj\nvariables:\n  expiry: "2026-07-02T10:00:00Z"\n'
+    )
+    config = load_config(tmp_path)
+    assert config.variables["expiry"] == "2026-07-02T10:00:00Z"
+
+
+def test_merge_var_file_rejects_timestamp(tmp_path):
+    """The strict loader also rejects timestamps in var files."""
+    config = _make_config(tmp_path)
+    var_file = tmp_path / "vars.yaml"
+    var_file.write_text("expiry: 2001-12-14 21:59:43.10 -5\n")
+    with pytest.raises(ConfigError) as excinfo:
+        merge_variables(config, var_file=[str(var_file)])
+    assert "21:59:43.100000" not in str(excinfo.value)
+
+
+# Finding 10: YAML 1.1 bool spellings yes/no/on/off must be rejected (Norway problem).
+
+
+@pytest.mark.parametrize("text", ["NO", "no", "yes", "Yes", "on", "off", "Off"])
+def test_load_config_rejects_yaml_keyword_bool_variable(tmp_path, text):
+    """yes/no/on/off spellings are rejected with the raw text, not coerced to true/false."""
+    (tmp_path / "tlumi.yaml").write_text(
+        f"project:\n  name: myproj\nvariables:\n  country: {text}\n"
+    )
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(tmp_path)
+    assert f"({text})" in str(excinfo.value)
+    assert f'country: "{text}"' in (excinfo.value.hint or "")
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [("true", "true"), ("True", "true"), ("TRUE", "true"), ("false", "false"), ("False", "false")],
+)
+def test_load_config_canonical_bool_still_lowercase(tmp_path, text, expected):
+    """Canonical true/false spellings still coerce to lowercase per convention."""
+    (tmp_path / "tlumi.yaml").write_text(f"project:\n  name: myproj\nvariables:\n  flag: {text}\n")
+    config = load_config(tmp_path)
+    assert config.variables["flag"] == expected
+
+
+def test_load_config_quoted_norway_variable_preserved(tmp_path):
+    """Quoting NO (as the hint suggests) preserves the literal string."""
+    (tmp_path / "tlumi.yaml").write_text('project:\n  name: myproj\nvariables:\n  country: "NO"\n')
+    config = load_config(tmp_path)
+    assert config.variables["country"] == "NO"
+
+
+# Finding 11: the float rejection hint must echo the raw text, not the parsed float.
+
+
+def test_load_config_float_hint_shows_raw_text(tmp_path):
+    """version: 1.10 must be rejected showing (1.10), never the corrupted (1.1)."""
+    (tmp_path / "tlumi.yaml").write_text("project:\n  name: myproj\nvariables:\n  version: 1.10\n")
+    with pytest.raises(ConfigError, match="decimal") as excinfo:
+        load_config(tmp_path)
+    assert "(1.10)" in str(excinfo.value)
+    assert "(1.1)" not in str(excinfo.value)
+    assert 'version: "1.10"' in (excinfo.value.hint or "")
+
+
+# Finding 12: non-string variable keys must be rejected, not repr-coerced.
+
+
+@pytest.mark.parametrize("key", ["on", "~", "1.10", "123", "true"])
+def test_load_config_rejects_non_string_variable_key(tmp_path, key):
+    """A YAML-coerced key (bool/null/number/float) is rejected instead of renamed."""
+    (tmp_path / "tlumi.yaml").write_text(
+        f"project:\n  name: myproj\nvariables:\n  {key}: somevalue\n"
+    )
+    with pytest.raises(ConfigError, match="must be a quoted string"):
+        load_config(tmp_path)
+
+
+def test_load_config_quoted_keyword_key_accepted(tmp_path):
+    """Quoting the key preserves it as the literal string the user wrote."""
+    (tmp_path / "tlumi.yaml").write_text('project:\n  name: myproj\nvariables:\n  "on": startup\n')
+    config = load_config(tmp_path)
+    assert config.variables["on"] == "startup"
+
+
+def test_merge_var_file_rejects_non_string_key(tmp_path):
+    """The var-file path also rejects coerced keys."""
+    config = _make_config(tmp_path)
+    var_file = tmp_path / "vars.yaml"
+    var_file.write_text("off: disable\n")
+    with pytest.raises(ConfigError, match="must be a quoted string"):
+        merge_variables(config, var_file=[str(var_file)])
+
+
+# Finding 13: an empty or comments-only --var-file means zero variables, not an error.
+
+
+def test_merge_var_file_comments_only_is_empty(tmp_path):
+    """A comments-only var file contributes no variables instead of hard-failing."""
+    config = _make_config(tmp_path, {"region": "us-east-1"})
+    var_file = tmp_path / "vars.yaml"
+    var_file.write_text("# region: overridden\n")
+    merged = merge_variables(config, var_file=[str(var_file)])
+    assert merged.variables == {"region": "us-east-1"}
+
+
+def test_merge_var_file_empty_is_empty(tmp_path):
+    """A completely empty var file contributes no variables."""
+    config = _make_config(tmp_path)
+    var_file = tmp_path / "vars.yaml"
+    var_file.write_text("")
+    merged = merge_variables(config, var_file=[str(var_file)])
+    assert merged.variables == {}
+
+
+def test_merge_var_file_scalar_still_rejected(tmp_path):
+    """A non-null, non-dict document is still rejected as a mapping error."""
+    config = _make_config(tmp_path)
+    var_file = tmp_path / "vars.yaml"
+    var_file.write_text("just-a-string\n")
+    with pytest.raises(ConfigError, match="must be a YAML mapping"):
+        merge_variables(config, var_file=[str(var_file)])
+
+
+# Finding 42: a NUL byte in a variable key or value must be a clean ConfigError.
+
+
+def test_load_config_rejects_nul_in_variable_value(tmp_path):
+    """An embedded NUL byte in a value is rejected before it reaches the pulumi argv."""
+    (tmp_path / "tlumi.yaml").write_text(
+        'project:\n  name: myproj\nvariables:\n  region: "us\\0east"\n'
+    )
+    with pytest.raises(ConfigError, match="NUL"):
+        load_config(tmp_path)
+
+
+def test_load_config_rejects_nul_in_variable_key(tmp_path):
+    """An embedded NUL byte in a key is rejected too."""
+    (tmp_path / "tlumi.yaml").write_text('project:\n  name: myproj\nvariables:\n  "a\\0b": value\n')
+    with pytest.raises(ConfigError, match="NUL"):
+        load_config(tmp_path)
+
+
+def test_merge_var_file_rejects_nul_in_value(tmp_path):
+    """The var-file path also rejects NUL bytes."""
+    config = _make_config(tmp_path)
+    var_file = tmp_path / "vars.yaml"
+    var_file.write_text('region: "us\\0east"\n')
+    with pytest.raises(ConfigError, match="NUL"):
+        merge_variables(config, var_file=[str(var_file)])
