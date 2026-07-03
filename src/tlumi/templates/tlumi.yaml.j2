@@ -1,0 +1,22 @@
+# tlumi project configuration
+project:
+  name: "{{ project_name }}"
+  entry: infra.py
+
+# Backend configuration (defaults to local state in .tlumi/state/)
+# Uncomment and modify to use a remote backend:
+# backend:
+#   url: "s3://my-state-bucket?region=us-east-1"   # AWS S3
+#   # url: "gs://my-state-bucket"                   # Google Cloud Storage
+#   # url: "azblob://my-state-container"            # Azure Blob Storage
+
+# Variables (also settable via --var or --var-file)
+# variables:
+#   environment: dev
+#   region: us-east-1
+
+# Secrets configuration
+# Set TLUMI_SECRETS_PASSPHRASE env var to encrypt secrets in state.
+secrets:
+  allow_unencrypted: {{ allow_unencrypted }}
+#   warn_unencrypted: false  # Suppress 'secrets not encrypted' warning

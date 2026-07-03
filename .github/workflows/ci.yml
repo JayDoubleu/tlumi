@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# Third-party actions are pinned to full commit SHAs (the trailing comment is
+# the tag the SHA was resolved from). Mutable tags can be repointed by a
+# compromised action repo; SHAs cannot. Update via Dependabot.
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          python-version: "3.13"
+      - name: Sync dev dependencies
+        run: uv sync --locked --dev
+      - name: Ruff lint
+        run: uv run ruff check src/ tests/ examples/
+      - name: Ruff format check
+        run: uv run ruff format --check src/ tests/
+      - name: Mypy
+        run: uv run mypy
+      - name: Bandit security scan
+        run: uv run bandit -r src/ -q
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        include:
+          - os: macos-latest
+            python-version: "3.13"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Sync dev dependencies
+        run: uv sync --locked --dev
+      - name: Run tests
+        run: uv run python -m pytest tests/ -q
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          python-version: "3.13"
+      - name: Build sdist and wheel
+        run: uv build
+      - name: Check distribution metadata
+        run: uvx twine check dist/*
+      - name: Verify sdist contains no internal files
+        run: |
+          LEAKS=$(tar -tzf dist/*.tar.gz | grep -E 'todo_continue|\.claude|docs/internal|\.scenarios' || true)
+          if [ -n "$LEAKS" ]; then
+            echo "Internal files leaked into the sdist:" >&2
+            echo "$LEAKS" >&2
+            exit 1
+          fi
+      - name: Smoke-test wheel install
+        run: |
+          uv venv /tmp/smoke-venv
+          VIRTUAL_ENV=/tmp/smoke-venv uv pip install dist/*.whl
+          /tmp/smoke-venv/bin/tlumi version
+          /tmp/smoke-venv/bin/tlumi --help > /dev/null
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist
+          path: dist/

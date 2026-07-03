@@ -1,0 +1,16 @@
+# Azure Modular Infrastructure example
+#
+# Demonstrates reusable components (Python's answer to Terraform modules).
+# Uses ComponentResource to group related resources into logical units,
+# then instantiates them multiple times with different configurations.
+
+project:
+  name: azure-modular-example
+  entry: infra.py
+
+secrets:
+  allow_unencrypted: true
+
+variables:
+  location: westeurope
+  environment: staging

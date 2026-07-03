@@ -1,0 +1,14 @@
+# Random provider example
+#
+# No cloud credentials needed. Uses pulumi-random to demonstrate
+# tlumi basics: variables, secrets, loops, and exports.
+
+project:
+  name: random-example
+  entry: infra.py
+
+secrets:
+  allow_unencrypted: true
+
+variables:
+  pet_count: 3

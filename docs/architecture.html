@@ -1,0 +1,1459 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>tlumi Architecture Explorer</title>
+<style>
+  :root {
+    --bg: #0a0e17;
+    --bg-secondary: rgba(15, 20, 35, 0.7);
+    --bg-tertiary: rgba(25, 32, 52, 0.6);
+    --border: rgba(120, 140, 180, 0.08);
+    --border-hover: rgba(120, 140, 180, 0.18);
+    --text: #e2e8f0;
+    --text-muted: #6b7a96;
+    --accent: #e8a832;
+    --accent-dim: rgba(232, 168, 50, 0.15);
+    --green: #4ee6a0;
+    --red: #f06060;
+    --orange: #e8a832;
+    --purple: #a78bfa;
+    --cyan: #7ca4ff;
+    --pink: #f778ba;
+    --yellow: #e8a832;
+
+    --font-body: 'Geist', 'SF Pro Display', -apple-system, system-ui, sans-serif;
+    --font-mono: 'Geist Mono', 'SF Mono', 'Cascadia Code', 'Fira Code', Menlo, monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: var(--font-body);
+    background: var(--bg);
+    color: var(--text);
+    overflow: hidden;
+    height: 100vh;
+    letter-spacing: 0.01em;
+    position: relative;
+  }
+  body::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image: radial-gradient(circle, rgba(120, 140, 180, 0.06) 1px, transparent 1px);
+    background-size: 24px 24px;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: rgba(232, 168, 50, 0.2); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: rgba(232, 168, 50, 0.35); }
+
+  /* Fade-in animation for view switching */
+  @keyframes fadeSlideIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes staggerIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  header {
+    background: rgba(10, 14, 23, 0.95);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border);
+    padding: 14px 28px;
+    display: flex;
+    align-items: center;
+    gap: 32px;
+    height: 56px;
+    z-index: 100;
+    position: relative;
+  }
+  header::after {
+    content: '';
+    position: absolute;
+    bottom: -1px;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(232, 168, 50, 0.15) 30%, rgba(232, 168, 50, 0.15) 70%, transparent);
+  }
+  header h1 { font-size: 16px; font-weight: 300; white-space: nowrap; letter-spacing: 0.02em; color: rgba(226, 232, 240, 0.7); }
+  header h1 span { color: var(--accent); font-weight: 600; }
+  .tabs { display: flex; gap: 0; }
+  .tab {
+    padding: 8px 18px; cursor: pointer; font-size: 12px; font-weight: 500;
+    color: var(--text-muted); border: none; background: transparent;
+    transition: color 0.2s; white-space: nowrap; letter-spacing: 0.04em;
+    text-transform: uppercase; position: relative; border-radius: 0;
+  }
+  .tab::after {
+    content: '';
+    position: absolute;
+    bottom: -14px;
+    left: 18px;
+    right: 18px;
+    height: 2px;
+    background: var(--accent);
+    opacity: 0;
+    transition: opacity 0.2s;
+    border-radius: 1px;
+  }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--text); }
+  .tab.active::after { opacity: 1; }
+  .main { height: calc(100vh - 56px); overflow: hidden; position: relative; z-index: 1; }
+  .view { display: none; height: 100%; overflow: auto; animation: fadeSlideIn 0.3s ease-out; }
+  .view.active { display: flex; }
+
+  /* ===== MODULE GRAPH ===== */
+  #graph-view { flex-direction: column; }
+  #graph-view .graph-container { flex: 1; position: relative; overflow: hidden; }
+  #graph-view svg { width: 100%; height: 100%; }
+  .node circle {
+    stroke-width: 1.5; cursor: pointer; transition: r 0.2s, filter 0.2s;
+    filter: url(#nodeGlow);
+  }
+  .node:hover circle { r: 22; filter: url(#nodeGlowHover); }
+  .node text { font-size: 10px; fill: var(--text); pointer-events: none; text-anchor: middle; font-family: var(--font-mono); letter-spacing: 0.02em; }
+  .link { stroke: rgba(120, 140, 180, 0.12); stroke-opacity: 1; fill: none; stroke-width: 1; }
+  .link.highlighted { stroke: var(--accent); stroke-opacity: 0.8; stroke-width: 1.5; }
+  .node.dimmed circle { opacity: 0.08; }
+  .node.dimmed text { opacity: 0.08; }
+  .link.dimmed { stroke-opacity: 0.03; }
+  .graph-legend {
+    position: absolute; top: 16px; left: 16px;
+    background: var(--bg-secondary); backdrop-filter: blur(12px);
+    border: 1px solid var(--border); border-radius: 8px; padding: 14px 18px; font-size: 11px; z-index: 10;
+  }
+  .graph-legend h3 { font-size: 9px; margin-bottom: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.12em; font-weight: 500; }
+  .legend-item { display: flex; align-items: center; gap: 8px; margin: 5px 0; color: var(--text-muted); font-weight: 300; }
+  .legend-dot { width: 8px; height: 8px; border-radius: 50%; box-shadow: 0 0 6px currentColor; }
+  .graph-detail {
+    position: absolute; top: 16px; right: -360px; width: 340px; max-height: calc(100% - 32px);
+    overflow-y: auto;
+    background: var(--bg-secondary); backdrop-filter: blur(16px);
+    border: 1px solid var(--border);
+    border-radius: 8px; padding: 20px; font-size: 13px; z-index: 10;
+    transition: right 0.3s ease-out, opacity 0.3s ease-out;
+    opacity: 0;
+    pointer-events: none;
+  }
+  .graph-detail.visible { right: 16px; opacity: 1; display: block; pointer-events: auto; }
+  .graph-detail h3 { color: var(--cyan); margin-bottom: 8px; font-weight: 500; font-size: 14px; font-family: var(--font-mono); }
+  .graph-detail .purpose { color: var(--text-muted); margin-bottom: 12px; line-height: 1.6; font-weight: 300; font-size: 12px; }
+  .graph-detail .section-title { font-size: 9px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--text-muted); margin: 14px 0 6px; font-weight: 500; }
+  .graph-detail ul { list-style: none; padding: 0; }
+  .graph-detail li { padding: 3px 0; font-family: var(--font-mono); font-size: 12px; }
+  .graph-detail .dep { color: var(--cyan); }
+  .graph-detail .export { color: var(--green); }
+  .graph-detail .cls { color: var(--purple); }
+  .graph-hint {
+    position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
+    background: var(--bg-secondary); backdrop-filter: blur(12px);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 14px; font-size: 11px; color: var(--text-muted); z-index: 10; font-weight: 300;
+  }
+  .arrow-marker { fill: rgba(120, 140, 180, 0.25); }
+
+  /* ===== COMMANDS ===== */
+  #commands-view { flex-direction: row; }
+  .cmd-sidebar {
+    width: 220px; background: rgba(10, 14, 23, 0.5);
+    border-right: none;
+    overflow-y: auto; padding: 20px 0; flex-shrink: 0;
+  }
+  .cmd-sidebar h3 {
+    font-size: 9px; text-transform: uppercase; letter-spacing: 0.12em;
+    color: var(--text-muted); padding: 0 20px; margin-bottom: 8px; font-weight: 500;
+  }
+  .cmd-item {
+    padding: 7px 20px; cursor: pointer; font-size: 12px;
+    font-family: var(--font-mono); color: var(--text-muted);
+    transition: all 0.15s; border-left: 3px solid transparent;
+    font-weight: 300;
+  }
+  .cmd-item:hover { color: var(--text); background: rgba(232, 168, 50, 0.03); }
+  .cmd-item.active { color: var(--accent); border-left-color: var(--accent); background: transparent; }
+  .cmd-item .sub { padding-left: 12px; }
+  .cmd-content { flex: 1; overflow-y: auto; padding: 28px 36px; max-width: 900px; animation: fadeSlideIn 0.25s ease-out; }
+  .cmd-content h2 { font-size: 22px; margin-bottom: 4px; font-weight: 500; }
+  .cmd-content h2 code { color: var(--accent); background: transparent; padding: 0; font-size: 20px; font-family: var(--font-mono); font-weight: 500; }
+  .cmd-subtitle { color: var(--text-muted); margin-bottom: 28px; font-size: 13px; font-weight: 300; }
+  .flow-step { position: relative; padding: 14px 20px; margin: 0 0 0 20px; border-left: 1px solid rgba(120, 140, 180, 0.12); }
+  .flow-step:last-child { border-left-color: transparent; }
+  .flow-step::before {
+    content: ''; position: absolute; left: -4px; top: 18px; width: 8px; height: 8px;
+    border-radius: 50%; background: var(--cyan);
+  }
+  .flow-step.module::before { background: var(--purple); }
+  .flow-step.security::before { background: var(--orange); }
+  .flow-step.pulumi::before { background: var(--cyan); }
+  .flow-step.output::before { background: var(--green); }
+  .flow-step h4 { font-size: 13px; margin-bottom: 4px; font-weight: 500; }
+  .flow-step p { font-size: 12px; color: var(--text-muted); line-height: 1.6; font-weight: 300; }
+  .flow-step code { font-family: var(--font-mono); font-size: 11px; background: var(--bg-tertiary); padding: 1px 6px; border-radius: 3px; color: var(--cyan); }
+  .flow-modules { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 16px; align-items: center; }
+  .flow-modules .tag {
+    font-size: 10px; padding: 2px 8px; border-radius: 12px; border: 1px solid var(--border);
+    color: var(--text-muted); font-family: var(--font-mono); letter-spacing: 0.02em;
+  }
+  .flow-modules .tag.active { border-color: rgba(167, 139, 250, 0.3); color: var(--purple); }
+  .cmd-flags { margin-top: 20px; border-top: 1px solid var(--border); padding-top: 16px; }
+  .cmd-flags h3 { font-size: 9px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--text-muted); margin-bottom: 10px; font-weight: 500; }
+  .flag { display: inline-block; font-family: var(--font-mono); font-size: 11px; padding: 3px 8px; margin: 2px 4px 2px 0; border-radius: 4px; background: var(--bg-tertiary); color: var(--accent); border: 1px solid var(--border); }
+
+  /* ===== DATA FLOW ===== */
+  #dataflow-view { flex-direction: column; overflow: hidden; }
+  .df-tabs { display: flex; gap: 0; padding: 16px 28px 0; border-bottom: 1px solid var(--border); }
+  .df-tab {
+    padding: 8px 18px; cursor: pointer; font-size: 11px; color: var(--text-muted);
+    border-bottom: 2px solid transparent; transition: all 0.2s; margin-bottom: -1px;
+    text-transform: uppercase; letter-spacing: 0.08em; font-weight: 500;
+  }
+  .df-tab:hover { color: var(--text); }
+  .df-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .df-content { flex: 1; overflow-y: auto; padding: 28px 36px; animation: fadeSlideIn 0.25s ease-out; }
+  .pipeline { display: flex; align-items: stretch; gap: 0; overflow-x: auto; padding: 16px 0; margin-bottom: 28px; }
+  .pipe-stage {
+    min-width: 180px; max-width: 240px;
+    background: var(--bg-secondary); backdrop-filter: blur(12px);
+    border: 1px solid var(--border); border-top: 3px solid var(--purple);
+    border-radius: 0 0 8px 8px; padding: 16px; flex-shrink: 0;
+    transition: box-shadow 0.2s;
+  }
+  .pipe-stage:hover { box-shadow: 0 0 20px rgba(232, 168, 50, 0.06); }
+  .pipe-stage h4 { font-size: 12px; margin-bottom: 4px; font-weight: 500; }
+  .pipe-stage .module-name { font-family: var(--font-mono); font-size: 10px; color: var(--purple); margin-bottom: 8px; letter-spacing: 0.02em; }
+  .pipe-stage p { font-size: 11px; color: var(--text-muted); line-height: 1.5; font-weight: 300; }
+  .pipe-arrow {
+    display: flex; align-items: center; flex-shrink: 0; padding: 0 4px;
+    color: var(--text-muted); font-size: 14px;
+  }
+  .detail-section {
+    background: var(--bg-secondary); backdrop-filter: blur(12px);
+    border: 1px solid var(--border);
+    border-radius: 8px; padding: 20px; margin-bottom: 16px;
+    transition: box-shadow 0.2s;
+    animation: staggerIn 0.3s ease-out both;
+  }
+  .detail-section:hover { box-shadow: 0 0 20px rgba(232, 168, 50, 0.04); }
+  .detail-section h3 { font-size: 14px; margin-bottom: 12px; color: var(--accent); font-weight: 500; }
+  .detail-section p { font-size: 12px; color: var(--text-muted); line-height: 1.6; margin-bottom: 6px; font-weight: 300; }
+  .detail-section code { font-family: var(--font-mono); font-size: 11px; background: var(--bg-tertiary); padding: 1px 5px; border-radius: 3px; color: var(--cyan); }
+  .priority-list { list-style: none; counter-reset: priority; }
+  .priority-list li { counter-increment: priority; padding: 8px 0 8px 36px; position: relative; font-size: 12px; color: var(--text-muted); line-height: 1.6; font-weight: 300; }
+  .priority-list li::before {
+    content: counter(priority); position: absolute; left: 0; top: 8px; width: 22px; height: 22px;
+    border-radius: 50%; background: var(--accent-dim); border: 1px solid rgba(232, 168, 50, 0.25);
+    color: var(--accent); font-size: 10px; font-weight: 600;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .security-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+  .security-table th { text-align: left; padding: 8px 12px; border-bottom: 1px solid rgba(120, 140, 180, 0.12); color: var(--text-muted); font-size: 9px; text-transform: uppercase; letter-spacing: 0.12em; font-weight: 500; }
+  .security-table td { padding: 8px 12px; border-bottom: 1px solid var(--border); color: var(--text-muted); vertical-align: top; font-weight: 300; }
+  .security-table td code { font-family: var(--font-mono); font-size: 11px; background: var(--bg-tertiary); padding: 1px 4px; border-radius: 3px; color: var(--cyan); }
+  .security-table tr:last-child td { border-bottom: none; }
+
+  /* ===== ERRORS ===== */
+  #errors-view { flex-direction: column; padding: 36px; overflow-y: auto; }
+  .error-tree { font-family: var(--font-mono); font-size: 13px; line-height: 2.4; }
+  .error-tree .tree-line {
+    position: relative;
+    padding-left: 0;
+  }
+  .error-tree .node-label {
+    cursor: pointer; padding: 4px 12px; border-radius: 6px; display: inline-block;
+    transition: background 0.15s, box-shadow 0.15s;
+  }
+  .error-tree .node-label:hover { background: var(--bg-tertiary); box-shadow: 0 0 12px rgba(232, 168, 50, 0.04); }
+  .error-tree .root { color: var(--text-muted); }
+  .error-tree .base { color: var(--red); font-weight: 600; }
+  .error-tree .child { color: var(--accent); font-weight: 400; }
+  .error-tree .connector { color: rgba(120, 140, 180, 0.2); user-select: none; }
+  .error-detail {
+    background: var(--bg-secondary); backdrop-filter: blur(12px);
+    border: 1px solid var(--border); border-left: 4px solid var(--red);
+    border-radius: 0 8px 8px 0; padding: 20px; margin-top: 24px;
+    font-family: var(--font-body);
+    display: none;
+    animation: fadeSlideIn 0.25s ease-out;
+  }
+  .error-detail.visible { display: block; }
+  .error-detail h3 { color: var(--red); font-size: 15px; margin-bottom: 12px; font-weight: 500; font-family: var(--font-mono); }
+  .error-detail .field { margin: 8px 0; font-size: 12px; }
+  .error-detail .field-name { color: var(--text-muted); font-size: 9px; text-transform: uppercase; letter-spacing: 0.12em; font-weight: 500; }
+  .error-detail .field-value { font-family: var(--font-mono); color: var(--cyan); margin-top: 2px; font-size: 12px; }
+  .error-detail .raised-by { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 12px; }
+  .error-detail .raised-by h4 { font-size: 9px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--text-muted); margin-bottom: 8px; font-weight: 500; }
+  .error-detail .raised-by li { font-size: 12px; color: var(--text-muted); padding: 3px 0; list-style: none; font-weight: 300; }
+
+  /* ===== TYPES ===== */
+  #types-view {
+    padding: 28px; gap: 16px; overflow-y: auto; align-content: flex-start;
+    height: 100%;
+  }
+  #types-view.active {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  }
+  .type-card {
+    background: var(--bg-secondary); backdrop-filter: blur(12px);
+    border: 1px solid var(--border);
+    border-radius: 8px; padding: 20px; position: relative;
+    transition: box-shadow 0.2s;
+    animation: staggerIn 0.3s ease-out both;
+  }
+  .type-card:hover { box-shadow: 0 0 20px rgba(232, 168, 50, 0.04); }
+  /* Corner accent tab */
+  .type-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 32px;
+    height: 3px;
+    border-radius: 0 0 2px 0;
+    background: var(--kind-color, var(--text-muted));
+  }
+  .type-card h3 { font-family: var(--font-mono); font-size: 14px; margin-bottom: 4px; font-weight: 500; }
+  .type-card .module-label { font-size: 10px; color: var(--text-muted); margin-bottom: 12px; letter-spacing: 0.04em; }
+  .type-card .type-kind { display: inline-block; font-size: 9px; text-transform: uppercase; letter-spacing: 0.12em; padding: 2px 8px; border-radius: 4px; margin-bottom: 12px; font-weight: 500; }
+  .type-kind.dataclass { background: rgba(78, 230, 160, 0.08); color: var(--green); border: 1px solid rgba(78, 230, 160, 0.15); }
+  .type-kind.namedtuple { background: rgba(167, 139, 250, 0.08); color: var(--purple); border: 1px solid rgba(167, 139, 250, 0.15); }
+  .type-kind.protocol { background: rgba(124, 164, 255, 0.08); color: var(--cyan); border: 1px solid rgba(124, 164, 255, 0.15); }
+  .type-kind.exception { background: rgba(240, 96, 96, 0.08); color: var(--red); border: 1px solid rgba(240, 96, 96, 0.15); }
+  .type-card .field-list { list-style: none; }
+  .type-card .field-list li { padding: 4px 0; font-size: 11px; font-family: var(--font-mono); border-bottom: 1px solid rgba(120, 140, 180, 0.05); }
+  .type-card .field-list li:last-child { border-bottom: none; }
+  .type-card .field-list .fname { color: var(--text); font-weight: 400; }
+  .type-card .field-list .ftype { color: var(--text-muted); font-weight: 300; }
+  .type-card .methods-label { font-size: 9px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--text-muted); margin: 14px 0 6px; font-weight: 500; }
+  .type-card .method { font-size: 11px; font-family: var(--font-mono); color: var(--accent); padding: 2px 0; font-weight: 400; }
+
+  /* ===== FILE LAYOUT ===== */
+  #layout-view { flex-direction: column; padding: 36px; overflow-y: auto; }
+  .file-tree { font-family: var(--font-mono); font-size: 12px; line-height: 1.9; }
+  .file-tree > div {
+    padding: 1px 8px;
+    border-radius: 4px;
+    transition: background 0.15s;
+  }
+  .file-tree > div:hover { background: rgba(232, 168, 50, 0.03); }
+  .file-tree .dir { color: var(--cyan); cursor: pointer; font-weight: 500; }
+  .file-tree .dir:hover { text-decoration: underline; }
+  .file-tree .file { color: var(--text); cursor: pointer; font-weight: 300; }
+  .file-tree .file:hover { color: var(--accent); }
+  .file-tree .connector { color: rgba(120, 140, 180, 0.2); user-select: none; }
+  .file-tree .annotation { color: var(--text-muted); font-family: var(--font-body); font-size: 11px; margin-left: 16px; font-weight: 300; }
+  .file-detail {
+    background: var(--bg-secondary); backdrop-filter: blur(12px);
+    border: 1px solid var(--border); border-left: 4px solid var(--cyan);
+    border-radius: 0 8px 8px 0; padding: 20px; margin-top: 24px;
+    display: none;
+    animation: fadeSlideIn 0.25s ease-out;
+  }
+  .file-detail.visible { display: block; }
+  .file-detail h3 { font-family: var(--font-mono); color: var(--cyan); font-size: 14px; margin-bottom: 8px; font-weight: 500; }
+
+  /* ===== LAYERS ===== */
+  #layers-view { flex-direction: column; align-items: flex-start; padding: 36px; overflow-y: auto; }
+  .layers-container { max-width: 800px; width: 100%; }
+  .layer {
+    border: 1px solid var(--border); border-left: 4px solid var(--text-muted);
+    border-radius: 0 8px 8px 0; margin-bottom: 8px; overflow: hidden;
+    transition: all 0.3s;
+    background: var(--bg-secondary); backdrop-filter: blur(12px);
+    animation: staggerIn 0.3s ease-out both;
+  }
+  .layer:hover { box-shadow: 0 0 20px rgba(232, 168, 50, 0.06); border-color: var(--border-hover); }
+  .layer-header { padding: 14px 20px; display: flex; align-items: center; gap: 12px; cursor: pointer; background: transparent; }
+  .layer-header h3 { font-size: 14px; flex: 1; font-weight: 500; }
+  .layer-chevron {
+    width: 16px; height: 16px; display: flex; align-items: center; justify-content: center;
+    transition: transform 0.25s ease;
+    color: var(--text-muted); font-size: 10px; flex-shrink: 0;
+  }
+  .layer-chevron::after {
+    content: '';
+    border: solid var(--text-muted);
+    border-width: 0 1.5px 1.5px 0;
+    display: inline-block;
+    padding: 3px;
+    transform: rotate(-45deg);
+    transition: transform 0.25s ease, border-color 0.25s ease;
+  }
+  .layer.open .layer-chevron::after {
+    transform: rotate(45deg);
+    border-color: var(--accent);
+  }
+  .layer-header .layer-badge {
+    font-size: 9px; padding: 3px 10px; border-radius: 12px; font-weight: 500;
+    letter-spacing: 0.08em; text-transform: uppercase;
+  }
+  .layer-body {
+    padding: 0 20px 0; background: transparent;
+    max-height: 0; overflow: hidden;
+    transition: max-height 0.35s ease-out, padding 0.35s ease-out;
+  }
+  .layer.open .layer-body { max-height: 300px; padding: 0 20px 16px; }
+  .layer-body .module-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .layer-body .module-chip {
+    font-family: var(--font-mono); font-size: 11px; padding: 3px 10px; border-radius: 6px;
+    background: var(--bg-tertiary); border: 1px solid var(--border);
+    cursor: pointer; transition: all 0.15s; font-weight: 400;
+  }
+  .layer-body .module-chip:hover { border-color: var(--accent); color: var(--accent); }
+  .layer-body p { font-size: 12px; color: var(--text-muted); line-height: 1.6; margin-top: 8px; font-weight: 300; }
+  .layer-arrow {
+    text-align: center; color: rgba(120, 140, 180, 0.2);
+    font-size: 12px; margin: 2px 0; line-height: 1;
+    display: flex; flex-direction: column; align-items: center;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1><span>tlumi</span> Architecture</h1>
+  <div class="tabs" id="main-tabs"></div>
+</header>
+<div class="main" id="main-container">
+  <div id="layers-view" class="view active"></div>
+  <div id="graph-view" class="view">
+    <div class="graph-container">
+      <svg id="graph-svg"></svg>
+      <div class="graph-legend">
+        <h3>Module Categories</h3>
+        <div class="legend-item"><div class="legend-dot" style="background:var(--accent)"></div> CLI / Entry</div>
+        <div class="legend-item"><div class="legend-dot" style="background:var(--purple)"></div> Commands</div>
+        <div class="legend-item"><div class="legend-dot" style="background:var(--cyan)"></div> Engine</div>
+        <div class="legend-item"><div class="legend-dot" style="background:var(--green)"></div> Display / Diff</div>
+        <div class="legend-item"><div class="legend-dot" style="background:var(--orange)"></div> Workspace</div>
+        <div class="legend-item"><div class="legend-dot" style="background:var(--red)"></div> Foundation</div>
+      </div>
+      <div class="graph-detail" id="graph-detail"></div>
+      <div class="graph-hint">Click a module to see details. Drag to rearrange. Scroll to zoom.</div>
+    </div>
+  </div>
+  <div id="commands-view" class="view">
+    <div class="cmd-sidebar">
+      <h3>Core Commands</h3>
+      <div class="cmd-item active" data-cmd="plan">plan</div>
+      <div class="cmd-item" data-cmd="apply">apply</div>
+      <div class="cmd-item" data-cmd="destroy">destroy</div>
+      <div class="cmd-item" data-cmd="refresh">refresh</div>
+      <div class="cmd-item" data-cmd="validate">validate</div>
+      <div class="cmd-item" data-cmd="import">import</div>
+      <h3 style="margin-top:16px">Project</h3>
+      <div class="cmd-item" data-cmd="init">init</div>
+      <div class="cmd-item" data-cmd="clean">clean</div>
+      <div class="cmd-item" data-cmd="fmt">fmt</div>
+      <div class="cmd-item" data-cmd="output">output</div>
+      <div class="cmd-item" data-cmd="show">show</div>
+      <h3 style="margin-top:16px">Dependencies</h3>
+      <div class="cmd-item" data-cmd="deps-add"><span class="sub">deps add</span></div>
+      <div class="cmd-item" data-cmd="deps-install"><span class="sub">deps install</span></div>
+      <div class="cmd-item" data-cmd="deps-list"><span class="sub">deps list</span></div>
+      <h3 style="margin-top:16px">State</h3>
+      <div class="cmd-item" data-cmd="state-list"><span class="sub">state list</span></div>
+      <div class="cmd-item" data-cmd="state-show"><span class="sub">state show</span></div>
+      <div class="cmd-item" data-cmd="state-rm"><span class="sub">state rm</span></div>
+      <div class="cmd-item" data-cmd="state-mv"><span class="sub">state mv</span></div>
+      <div class="cmd-item" data-cmd="state-pull"><span class="sub">state pull</span></div>
+      <div class="cmd-item" data-cmd="state-push"><span class="sub">state push</span></div>
+      <div class="cmd-item" data-cmd="state-unlock"><span class="sub">state unlock</span></div>
+    </div>
+    <div class="cmd-content" id="cmd-content"></div>
+  </div>
+  <div id="dataflow-view" class="view">
+    <div class="df-tabs">
+      <div class="df-tab active" data-panel="df-config">Config</div>
+      <div class="df-tab" data-panel="df-diffs">Diff Pipeline</div>
+      <div class="df-tab" data-panel="df-state">State</div>
+      <div class="df-tab" data-panel="df-secrets">Secrets</div>
+      <div class="df-tab" data-panel="df-uv">uv / Deps</div>
+      <div class="df-tab" data-panel="df-security">Security</div>
+    </div>
+    <div class="df-content" id="df-content"></div>
+  </div>
+  <div id="types-view" class="view"></div>
+  <div id="errors-view" class="view"></div>
+  <div id="layout-view" class="view"></div>
+</div>
+
+<script>
+// ===== All static data =====
+const TABS = [
+  { id: 'layers-view', label: 'Layers' },
+  { id: 'graph-view', label: 'Module Graph' },
+  { id: 'commands-view', label: 'Commands' },
+  { id: 'dataflow-view', label: 'Data Flows' },
+  { id: 'types-view', label: 'Types' },
+  { id: 'errors-view', label: 'Errors' },
+  { id: 'layout-view', label: 'File Layout' }
+];
+
+const categoryColors = {
+  cli: '#58a6ff', commands: '#bc8cff', engine: '#39d2c0',
+  display: '#3fb950', workspace: '#d29922', foundation: '#f85149'
+};
+
+const modules = {
+  'cli': { category: 'cli', label: 'cli.py', purpose: 'CLI entry point. Typer commands, option types, error handling, Live window setup, JSON error emission.', deps: ['display','errors'], exports: ['app','RunContext','_run()','main()','20+ command functions'], classes: ['RunContext','_WorkspaceNoticeHandler'] },
+  '__main__': { category: 'cli', label: '__main__.py', purpose: 'Entry point for python -m tlumi.', deps: ['cli'], exports: [], classes: [] },
+  '_common': { category: 'commands', label: '_common.py', purpose: 'Shared setup_command() boilerplate: config, stack, targets.', deps: ['config','display','resolve','workspace'], exports: ['setup_command()'], classes: [] },
+  'init': { category: 'commands', label: 'commands/init.py', purpose: 'Initialize new tlumi project: templates, venv, deps.', deps: ['config','display','errors','uv'], exports: ['run_init()'], classes: [] },
+  'clean': { category: 'commands', label: 'commands/clean.py', purpose: 'Remove .tlumi/ directory (symlink-safe).', deps: ['config','display','errors'], exports: ['run_clean()','_safe_rmtree()'], classes: [] },
+  'plan': { category: 'commands', label: 'commands/plan.py', purpose: 'Preview infrastructure changes via stack.preview().', deps: ['_common','display','engine'], exports: ['run_plan()'], classes: [] },
+  'apply': { category: 'commands', label: 'commands/apply.py', purpose: 'Apply infrastructure changes: preview + up.', deps: ['_common','display','errors','engine'], exports: ['run_apply()'], classes: [] },
+  'destroy': { category: 'commands', label: 'commands/destroy.py', purpose: 'Destroy infrastructure. Reads state first for display.', deps: ['config','display','errors','engine','resolve','workspace'], exports: ['run_destroy()'], classes: [] },
+  'refresh': { category: 'commands', label: 'commands/refresh.py', purpose: 'Reconcile state with cloud via stack.refresh().', deps: ['_common','display','engine'], exports: ['run_refresh()'], classes: [] },
+  'validate': { category: 'commands', label: 'commands/validate.py', purpose: 'Validate config + entry syntax (no Pulumi needed).', deps: ['config','display','errors'], exports: ['run_validate()'], classes: [] },
+  'fmt': { category: 'commands', label: 'commands/fmt.py', purpose: 'Format Python files via uv tool run ruff format.', deps: ['config','display','errors','uv'], exports: ['run_fmt()'], classes: [] },
+  'output': { category: 'commands', label: 'commands/output.py', purpose: 'Display stack output values from state.', deps: ['config','display','errors','workspace'], exports: ['run_output()'], classes: [] },
+  'show': { category: 'commands', label: 'commands/show.py', purpose: 'Full state dump of all resources.', deps: ['config','display','resolve','sanitize','workspace'], exports: ['run_show()'], classes: [] },
+  'deps': { category: 'commands', label: 'commands/deps.py', purpose: 'Manage Python provider packages (add/install/list).', deps: ['config','display','errors','uv'], exports: ['run_deps_add()','run_deps_install()','run_deps_list()'], classes: [] },
+  'state': { category: 'commands', label: 'commands/state.py', purpose: 'State management: list, show, rm, mv, pull, push.', deps: ['config','display','errors','resolve','sanitize','workspace'], exports: ['run_state_list()','run_state_show()','run_state_rm()','run_state_mv()','run_state_pull()','run_state_push()'], classes: [] },
+  'import_cmd': { category: 'commands', label: 'commands/import_cmd.py', purpose: 'Import existing cloud resources into state.', deps: ['config','display','engine','workspace'], exports: ['run_import()'], classes: [] },
+  'cancel': { category: 'commands', label: 'commands/cancel.py', purpose: 'Release stale state lock (state unlock).', deps: ['config','display','errors','workspace'], exports: ['run_cancel()'], classes: [] },
+  'engine': { category: 'engine', label: 'engine.py', purpose: 'Pulumi event handling: preview diffs, live progress, error collection, animated display.', deps: ['diffs','display','errors','resolve'], exports: ['EventHandler','catch_engine_errors()'], classes: ['EventHandler','_AnimatedLog','_OpDisplay'] },
+  'display': { category: 'display', label: 'display.py', purpose: 'Rich output: themes, console, Live display, diff trees, print helpers, window context.', deps: ['resolve'], exports: ['console','print_*','format_diff_tree()','create_window()','animated_status()','install_live()','confirm()'], classes: ['_WindowContext','WindowLiveProxy','_AnimatedStatus','_InstallLog','LiveDisplay'] },
+  'diffs': { category: 'display', label: 'diffs.py', purpose: 'Property diff extraction, sanitization, expansion, formatting.', deps: ['sdk_compat','sanitize'], exports: ['PropertyChange','extract_property_diffs()'], classes: ['PropertyChange'] },
+  'sanitize': { category: 'display', label: 'sanitize.py', purpose: 'Pulumi sentinel detection and value sanitization.', deps: [], exports: ['_sanitize_value()','_unwrap_secrets()','sentinel constants'], classes: [] },
+  'sdk_compat': { category: 'display', label: 'sdk_compat.py', purpose: 'SDK monkey-patch: source position suppression.', deps: [], exports: [], classes: [] },
+  'workspace': { category: 'workspace', label: 'workspace.py', purpose: 'Pulumi Automation API wrapper: CLI install, stack creation, inline program loading.', deps: ['config','errors'], exports: ['get_stack()','safe_export_stack()','_load_inline_program()'], classes: [] },
+  'resolve': { category: 'workspace', label: 'resolve.py', purpose: 'URN parsing, resource resolution (name, type::name, full URN).', deps: ['errors','workspace'], exports: ['name_from_urn()','type_from_urn()','display_from_urn()','resolve_resource()','resolve_targets()'], classes: [] },
+  'config': { category: 'foundation', label: 'config.py', purpose: 'YAML config parsing, project discovery, variable merging.', deps: ['errors'], exports: ['ProjectConfig','load_config()','find_project_dir()','merge_variables()','constants'], classes: ['ProjectConfig','BackendConfig','SecretsConfig'] },
+  'errors': { category: 'foundation', label: 'errors.py', purpose: 'Error hierarchy: TlumiError and subclasses, Diagnostic NamedTuple.', deps: [], exports: ['TlumiError','ConfigError','WorkspaceError','ProjectNotFoundError','EngineError','Diagnostic'], classes: ['TlumiError','ConfigError','WorkspaceError','ProjectNotFoundError','EngineError','Diagnostic'] },
+  'uv': { category: 'foundation', label: 'uv.py', purpose: 'uv binary management: discovery, download, venv creation, package ops.', deps: ['errors'], exports: ['ensure_uv()','create_venv()','run_install()','run_list()'], classes: [] },
+  'redact': { category: 'foundation', label: 'redact.py', purpose: 'Free-form credential redaction for stderr/diagnostic strings (URL creds, SAS params, key-value secrets).', deps: [], exports: ['redact_text()'], classes: [] },
+  'safeio': { category: 'foundation', label: '_safeio.py', purpose: 'Symlink-safe file/dir primitives: O_NOFOLLOW writes, lstat-checked mkdir, fd-based chmod.', deps: [], exports: ['safe_write_text()','safe_append_text()','safe_mkdir()','safe_chmod_dir()'], classes: [] }
+};
+
+const commandData = {
+  'plan': { title: 'tlumi plan', subtitle: 'Preview infrastructure changes without making any modifications.', flags: ['--var KEY=VALUE','--var-file PATH','--target/-t NAME','--replace/-r NAME','--destroy','--out/-o PATH','--json'], usesSetup: true, steps: [
+    { type: 'module', title: 'setup_command()', desc: 'Loads config from tlumi.yaml, merges variables (TLUMI_VAR_* < --var-file < --var), initializes Pulumi stack, resolves --target identifiers to URNs.' },
+    { type: 'pulumi', title: 'EventHandler + stack.preview()', desc: 'Creates EventHandler(quiet=json_output). Runs stack.preview() inside catch_engine_errors(). Pulumi streams events to on_preview() callback.' },
+    { type: '', title: 'on_preview() processing', desc: 'Each resource event triggers extract_property_diffs(meta) from diffs.py. Skips Stack type, SAME ops, and deduplicates replacements (shows REPLACE only, not CREATE_REPLACEMENT + DELETE_REPLACED).' },
+    { type: 'output', title: 'Summary output', desc: 'JSON mode: emits {changes, targets, resource_diffs}. Rich mode: prints plan summary with create/update/replace/delete counts.' }
+  ], modules: ['_common','config','workspace','resolve','display','engine','diffs','sanitize','sdk_compat'] },
+  'apply': { title: 'tlumi apply', subtitle: 'Apply infrastructure changes. Preview first when interactive.', flags: ['--auto-approve','--show-secrets','--var KEY=VALUE','--var-file PATH','--target/-t NAME','--replace/-r NAME','--plan PATH','--json'], usesSetup: true, steps: [
+    { type: 'security', title: 'JSON mode guard', desc: 'Requires --auto-approve in JSON mode (destructive ops cannot prompt for confirmation).' },
+    { type: 'module', title: 'setup_command()', desc: 'Full config/stack/target initialization.' },
+    { type: 'pulumi', title: 'Interactive preview (optional)', desc: 'When no --auto-approve: runs stack.preview() with on_preview() to show planned changes, then prompts with confirm(). Skips if no changes detected.' },
+    { type: 'pulumi', title: 'stack.up() with on_update()', desc: 'Creates new EventHandler. start_live() creates animated rolling display. on_update() shows per-resource progress with timing.' },
+    { type: 'output', title: 'Results', desc: 'Shows apply summary with duration, resource change counts, and stack outputs. Secrets masked as (sensitive) unless --show-secrets.' }
+  ], modules: ['_common','config','workspace','resolve','display','engine','diffs','sanitize','errors'] },
+  'destroy': { title: 'tlumi destroy', subtitle: 'Destroy all infrastructure. Reads state first for display.', flags: ['--auto-approve','--var KEY=VALUE','--var-file PATH','--target/-t NAME','--json'], usesSetup: false, steps: [
+    { type: 'security', title: 'JSON mode + approval guard', desc: 'Requires --auto-approve in JSON mode.' },
+    { type: 'module', title: 'Direct imports (no setup_command)', desc: 'Uses load_config + merge_variables + get_stack directly because it needs to read state before displaying the destruction plan.' },
+    { type: 'pulumi', title: 'Read state once', desc: 'safe_export_stack() reads state for both display and target resolution. Passes resources= to resolve_targets() to avoid double state read.' },
+    { type: 'output', title: 'Display destruction plan', desc: 'Shows each resource with red "-" prefix. Prompts for confirmation unless --auto-approve.' },
+    { type: 'pulumi', title: 'stack.destroy() with on_update()', desc: 'Live animated display during destruction.' },
+    { type: 'output', title: 'Completion summary', desc: 'Shows delete count and duration.' }
+  ], modules: ['config','workspace','resolve','display','engine','errors'] },
+  'refresh': { title: 'tlumi refresh', subtitle: 'Reconcile local state with actual cloud resources.', flags: ['--var KEY=VALUE','--var-file PATH','--target/-t NAME','--json'], usesSetup: true, steps: [
+    { type: 'module', title: 'setup_command()', desc: 'Config/stack/target initialization.' },
+    { type: 'pulumi', title: 'stack.refresh() with on_update()', desc: 'Live animated display. EventHandler collects resource changes.' },
+    { type: 'output', title: 'Summary', desc: 'If changes: resource change summary with duration. Otherwise: "State is up-to-date".' }
+  ], modules: ['_common','config','workspace','resolve','display','engine'] },
+  'validate': { title: 'tlumi validate', subtitle: 'Validate project config and entry syntax without running Pulumi.', flags: ['--var KEY=VALUE','--var-file PATH','--json'], usesSetup: false, steps: [
+    { type: 'module', title: 'load_config()', desc: 'Loads and validates tlumi.yaml structure.' },
+    { type: 'module', title: 'merge_variables()', desc: 'Merges env/file/CLI variables with full validation.' },
+    { type: '', title: 'Entry file + syntax check', desc: 'Verifies file exists, then compile(source, path, "exec") catches SyntaxError.' },
+    { type: 'output', title: 'Result', desc: 'JSON: {valid: true, checks: [...]}. Rich: per-check success messages.' }
+  ], modules: ['config','display','errors'] },
+  'import': { title: 'tlumi import', subtitle: 'Import existing cloud resources into Pulumi state.', flags: ['--var KEY=VALUE','--var-file PATH','--protect'], usesSetup: false, steps: [
+    { type: 'module', title: 'Config + stack setup', desc: 'Direct load_config + merge_variables + get_stack.' },
+    { type: 'pulumi', title: 'stack.import_resources()', desc: 'Passes resource type, logical name, and cloud resource ID.' },
+    { type: 'output', title: 'Success + hints', desc: 'Shows success with _suggest_class() hint for the Pulumi resource class name.' }
+  ], modules: ['config','display','engine','workspace'] },
+  'init': { title: 'tlumi init', subtitle: 'Initialize a new tlumi project with templates and dependencies.', flags: [], usesSetup: false, steps: [
+    { type: 'security', title: 'Symlink check on .tlumi', desc: 'Rejects .tlumi if it is a symlink.' },
+    { type: '', title: 'State assessment', desc: 'Checks if already initialized, existing project (config but no venv), or new project.' },
+    { type: '', title: 'Interactive passphrase prompt', desc: 'When stdin is a tty, asks about encryption setup.' },
+    { type: 'module', title: 'Template rendering', desc: 'Jinja2 renders tlumi.yaml, infra.py, requirements.txt, .gitignore. Symlink checks before each write.' },
+    { type: 'module', title: 'ensure_uv() + create_venv()', desc: 'Finds or downloads uv (SHA-256 verified), creates virtual environment.' },
+    { type: 'output', title: 'Install dependencies', desc: 'install_live() shows animated progress while uv installs from requirements.txt.' }
+  ], modules: ['config','display','errors','uv'] },
+  'clean': { title: 'tlumi clean', subtitle: 'Remove .tlumi/ directory (caches, optionally state).', flags: ['--auto-approve','--include-state'], usesSetup: false, steps: [
+    { type: 'security', title: 'Symlink handling', desc: 'If .tlumi is a symlink: unlinks without touching target.' },
+    { type: '', title: 'Mode selection', desc: 'Without --include-state: removes only caches, preserves state/backups. With: removes everything.' },
+    { type: 'security', title: '_safe_rmtree()', desc: 'Checks root path for symlink before os.scandir(). Skips symlinked children.' }
+  ], modules: ['config','display','errors'] },
+  'fmt': { title: 'tlumi fmt', subtitle: 'Format Python files using ruff via uv.', flags: ['--check'], usesSetup: false, steps: [
+    { type: 'module', title: 'find_project_dir()', desc: 'Only needs project directory (works even with invalid tlumi.yaml).' },
+    { type: 'module', title: 'ensure_uv() + ruff', desc: 'Runs: uv tool run ruff format --exclude .tlumi [--check] project_dir.' }
+  ], modules: ['config','display','errors','uv'] },
+  'output': { title: 'tlumi output', subtitle: 'Display stack output values.', flags: ['--raw','--show-secrets','--json','NAME'], usesSetup: false, steps: [
+    { type: 'module', title: 'Config + stack', desc: 'load_config + get_stack with animated status.' },
+    { type: 'pulumi', title: 'safe_export_stack() / stack.outputs()', desc: 'Default: masked values from exported state (nested secrets keep their wrappers, masked as (sensitive)). --show-secrets: plaintext via stack.outputs().' },
+    { type: 'output', title: 'Display', desc: 'JSON or Rich formatted. --raw prints plain value.' }
+  ], modules: ['config','display','errors','workspace'] },
+  'show': { title: 'tlumi show', subtitle: 'Full state dump of all resources.', flags: ['--show-secrets','--json'], usesSetup: false, steps: [
+    { type: 'module', title: 'Config + stack + export', desc: 'load_config + get_stack + safe_export_stack() for full state.' },
+    { type: 'output', title: 'Display', desc: 'JSON: raw {version, deployment}. Rich: per-resource URN, ID, parent, deps, inputs, outputs.' }
+  ], modules: ['config','display','resolve','sanitize','workspace'] },
+  'deps-add': { title: 'tlumi deps add', subtitle: 'Add Python packages and install.', flags: ['PACKAGES...'], usesSetup: false, steps: [
+    { type: 'security', title: 'Input validation', desc: 'Rejects packages starting with - or containing \\n/\\r.' },
+    { type: 'module', title: 'Normalize + write', desc: '_normalize_name() then append to requirements.txt. Install via uv.' }
+  ], modules: ['config','display','errors','uv'] },
+  'deps-install': { title: 'tlumi deps install', subtitle: 'Install from requirements.txt.', flags: [], usesSetup: false, steps: [
+    { type: 'module', title: 'ensure_uv() + install', desc: 'uv pip install -r requirements.txt with streaming output.' }
+  ], modules: ['config','display','uv'] },
+  'deps-list': { title: 'tlumi deps list', subtitle: 'List installed packages.', flags: [], usesSetup: false, steps: [
+    { type: 'module', title: 'uv pip list', desc: 'Runs uv pip list --format=columns.' }
+  ], modules: ['config','display','uv'] },
+  'state-list': { title: 'tlumi state list', subtitle: 'List all resources in state.', flags: ['--json'], usesSetup: false, steps: [
+    { type: 'pulumi', title: 'safe_export_stack()', desc: 'Reads full state, filters out Stack resources.' },
+    { type: 'output', title: 'Display', desc: 'JSON: [{type, name, id}]. Rich: per-resource listing with count.' }
+  ], modules: ['config','display','resolve','workspace'] },
+  'state-show': { title: 'tlumi state show', subtitle: 'Detailed state for a single resource.', flags: ['RESOURCE','--show-secrets','--json'], usesSetup: false, steps: [
+    { type: 'module', title: 'Resolve resource', desc: 'run_state_show() calls resolve_resource() directly (name, type::name, or URN).' },
+    { type: 'output', title: 'Display', desc: 'Sanitized inputs/outputs unless --show-secrets.' }
+  ], modules: ['config','display','resolve','sanitize','workspace'] },
+  'state-rm': { title: 'tlumi state rm', subtitle: 'Remove resource from state with backup.', flags: ['RESOURCE','--auto-approve'], usesSetup: false, steps: [
+    { type: 'module', title: 'Resolve + scan dependents', desc: 'Finds target, scans 5 reference types in all resources.' },
+    { type: 'security', title: 'Backup via _write_secure()', desc: 'O_CREAT|O_EXCL + 0o600. _rotate_backups() keeps last 10.' },
+    { type: 'pulumi', title: 'Clean refs + import', desc: 'Removes target, cleans parent/deps/provider/deletedWith/propertyDeps. Writes back via import_stack().' }
+  ], modules: ['config','display','errors','resolve','workspace'] },
+  'state-mv': { title: 'tlumi state mv', subtitle: 'Rename a resource in state with backup.', flags: ['SOURCE','DESTINATION','--auto-approve'], usesSetup: false, steps: [
+    { type: 'module', title: 'Resolve source + parse destination', desc: 'Resolves the source resource; a type::name destination splits on the FIRST :: so names containing :: work.' },
+    { type: 'security', title: 'Backup via _write_secure()', desc: 'O_CREAT|O_EXCL + 0o600. _rotate_backups() keeps last 10 per op.' },
+    { type: 'pulumi', title: 'Rewrite URN + refs + import', desc: 'Rewrites the URN positionally and all 5 reference types; warns when children exist. Writes back via import_stack().' }
+  ], modules: ['config','display','errors','resolve','workspace'] },
+  'state-pull': { title: 'tlumi state pull', subtitle: 'Export state as JSON to stdout.', flags: [], usesSetup: false, steps: [
+    { type: 'pulumi', title: 'get_stack(quiet=True) + export', desc: 'Always quiet. Outputs {version, deployment} JSON.' }
+  ], modules: ['config','display','workspace'] },
+  'state-push': { title: 'tlumi state push', subtitle: 'Import state from JSON file.', flags: ['FILE','--auto-approve','--json'], usesSetup: false, steps: [
+    { type: '', title: 'Validate + diff', desc: 'Parses JSON, validates structure, computes URN diff vs current state.' },
+    { type: 'security', title: 'Backup current state', desc: 'Before overwrite, via _write_secure() + rotation.' },
+    { type: 'pulumi', title: 'stack.import_stack()', desc: 'Writes new state.' }
+  ], modules: ['config','display','resolve','workspace'] },
+  'state-unlock': { title: 'tlumi state unlock', subtitle: 'Release stale state lock.', flags: [], usesSetup: false, steps: [
+    { type: 'pulumi', title: 'stack.cancel()', desc: 'Releases lock. Catches "no update running" as info.' }
+  ], modules: ['config','display','errors','workspace'] }
+};
+
+// ===== Helper: safe text setting =====
+function setText(el, text) { el.textContent = text; }
+function createEl(tag, cls, text) {
+  const el = document.createElement(tag);
+  if (cls) el.className = cls;
+  if (text) el.textContent = text;
+  return el;
+}
+function createSVGEl(tag, attrs) {
+  const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  if (attrs) Object.entries(attrs).forEach(([k,v]) => el.setAttribute(k, v));
+  return el;
+}
+
+// ===== Navigate to a module in the graph =====
+function navigateToModule(label) {
+  // Find the module key from its label (e.g. "cli.py" -> "cli")
+  const key = Object.keys(modules).find(k => modules[k].label === label || modules[k].label.endsWith('/' + label));
+  if (!key) return;
+  // Switch to graph tab
+  const tabsEl = document.getElementById('main-tabs');
+  tabsEl.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+  document.querySelectorAll('.view').forEach(x => x.classList.remove('active'));
+  const graphTab = tabsEl.querySelector('[data-view="graph-view"]');
+  if (graphTab) graphTab.classList.add('active');
+  document.getElementById('graph-view').classList.add('active');
+  if (!window._graphInit) initGraph();
+  // Highlight the node after a short delay to let the graph settle
+  setTimeout(() => {
+    const nodeEl = document.querySelector('#graph-svg .node[data-id="' + key + '"]');
+    if (nodeEl) nodeEl.dispatchEvent(new Event('click', { bubbles: true }));
+  }, 300);
+}
+
+// ===== Tab switching =====
+function initTabs() {
+  const tabsEl = document.getElementById('main-tabs');
+  TABS.forEach((t, i) => {
+    const tab = createEl('div', 'tab' + (i === 0 ? ' active' : ''));
+    tab.textContent = t.label;
+    tab.dataset.view = t.id;
+    tab.addEventListener('click', () => {
+      tabsEl.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+      document.querySelectorAll('.view').forEach(x => x.classList.remove('active'));
+      tab.classList.add('active');
+      document.getElementById(t.id).classList.add('active');
+      if (t.id === 'graph-view' && !window._graphInit) initGraph();
+    });
+    tabsEl.appendChild(tab);
+  });
+}
+
+// ===== LAYERS VIEW =====
+function buildLayers() {
+  const container = document.getElementById('layers-view');
+  const wrapper = createEl('div', 'layers-container');
+  const subtitle = createEl('p');
+  subtitle.style.cssText = 'margin-bottom:28px;color:var(--text-muted);font-weight:300;font-size:13px;letter-spacing:0.01em;';
+  subtitle.textContent = 'Click any layer to expand. Each layer only depends on layers below it.';
+  wrapper.appendChild(subtitle);
+
+  const layers = [
+    { name: 'CLI Layer', badge: 'Entry Point', badgeColor: 'var(--accent)', desc: 'Typer-based command registration, option parsing, error boundaries, Live display window management, logging handlers. All commands lazy-import from the commands layer.', mods: ['cli.py', '__main__.py'] },
+    { name: 'Commands Layer', badge: '14 commands', badgeColor: 'var(--purple)', desc: 'One file per command. _common.py provides shared setup_command() boilerplate. Commands needing special flows use direct imports.', mods: ['_common.py','init.py','plan.py','apply.py','destroy.py','refresh.py','validate.py','clean.py','fmt.py','output.py','show.py','deps.py','state.py','import_cmd.py','cancel.py'] },
+    { name: 'Engine Layer', badge: 'Event Processing', badgeColor: 'var(--cyan)', desc: 'Pulumi event stream handling with Rich Live animated display. EventHandler has on_preview() for diffs and on_update() for live progress.', mods: ['engine.py'] },
+    { name: 'Display + Diff Layer', badge: 'Rich Output', badgeColor: 'var(--green)', desc: 'Rich-based terminal output. Property diff extraction pipeline. Linear import chain: display.py > resolve.py > workspace.py (no cycles).', mods: ['display.py','diffs.py','sanitize.py','sdk_compat.py'] },
+    { name: 'Workspace Layer', badge: 'Pulumi API', badgeColor: 'var(--orange)', desc: 'Core Pulumi Automation API wrapper. CLI installation, inline program loading, stack creation, config reconciliation.', mods: ['workspace.py','resolve.py'] },
+    { name: 'Foundation Layer', badge: 'Base Layer', badgeColor: 'var(--red)', desc: 'The bottom layer. errors.py is a true leaf with no internal imports; config.py and uv.py depend only on errors.py. Config parsing, error hierarchy, uv binary management.', mods: ['config.py','errors.py','uv.py','redact.py','_safeio.py'] }
+  ];
+
+  const layerBorderColors = ['var(--accent)', 'var(--purple)', 'var(--cyan)', 'var(--green)', 'var(--orange)', 'var(--red)'];
+
+  layers.forEach((layer, i) => {
+    const layerEl = createEl('div', 'layer' + (i === 0 ? ' open' : ''));
+    layerEl.style.borderLeftColor = layerBorderColors[i];
+    layerEl.style.animationDelay = (i * 0.05) + 's';
+    const header = createEl('div', 'layer-header');
+    header.addEventListener('click', () => layerEl.classList.toggle('open'));
+    const chevron = createEl('div', 'layer-chevron');
+    const h3 = createEl('h3', null, layer.name);
+    const badge = createEl('span', 'layer-badge', layer.badge);
+    badge.style.background = layer.badgeColor;
+    badge.style.color = '#0a0e17';
+    header.appendChild(chevron);
+    header.appendChild(h3);
+    header.appendChild(badge);
+    layerEl.appendChild(header);
+
+    const body = createEl('div', 'layer-body');
+    const p = createEl('p', null, layer.desc);
+    body.appendChild(p);
+    const modList = createEl('div', 'module-list');
+    layer.mods.forEach(m => {
+      const chip = createEl('span', 'module-chip', m);
+      chip.addEventListener('click', (e) => {
+        e.stopPropagation();
+        navigateToModule(m);
+      });
+      modList.appendChild(chip);
+    });
+    body.appendChild(modList);
+    layerEl.appendChild(body);
+    wrapper.appendChild(layerEl);
+
+    if (i < layers.length - 1) {
+      const arrow = createEl('div', 'layer-arrow');
+      // Use a thin line with small chevron instead of big arrow
+      const line = createEl('div');
+      line.style.cssText = 'width:1px;height:8px;background:rgba(120,140,180,0.15);';
+      const chevron = createEl('div');
+      chevron.style.cssText = 'width:6px;height:6px;border-right:1px solid rgba(120,140,180,0.4);border-bottom:1px solid rgba(120,140,180,0.4);transform:rotate(45deg);margin-top:-2px;';
+      arrow.appendChild(line);
+      arrow.appendChild(chevron);
+      wrapper.appendChild(arrow);
+    }
+  });
+  container.appendChild(wrapper);
+}
+
+// ===== MODULE GRAPH =====
+function initGraph() {
+  window._graphInit = true;
+  const svg = document.getElementById('graph-svg');
+  const container = svg.parentElement;
+  const W = container.clientWidth, H = container.clientHeight;
+  svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+
+  const nodeKeys = Object.keys(modules);
+  const nodes = nodeKeys.map(k => ({
+    id: k, x: W/2 + (Math.random()-0.5)*400, y: H/2 + (Math.random()-0.5)*300,
+    vx: 0, vy: 0, r: 16, color: categoryColors[modules[k].category], _fixed: false
+  }));
+  const nodeMap = {}; nodes.forEach(n => nodeMap[n.id] = n);
+  const links = [];
+  nodeKeys.forEach(k => (modules[k].deps||[]).forEach(d => { if (nodeMap[d]) links.push({source:k, target:d}); }));
+
+  // SVG defs with glow filters
+  const defs = createSVGEl('defs');
+  const marker = createSVGEl('marker', {id:'arrow', viewBox:'0 0 10 10', refX:'28', refY:'5', markerWidth:'6', markerHeight:'6', orient:'auto'});
+  marker.appendChild(createSVGEl('path', {d:'M 0 0 L 10 5 L 0 10 z', class:'arrow-marker'}));
+  defs.appendChild(marker);
+
+  // Node glow filter
+  const glowFilter = createSVGEl('filter', {id:'nodeGlow', x:'-50%', y:'-50%', width:'200%', height:'200%'});
+  const blur = createSVGEl('feGaussianBlur', {stdDeviation:'3', result:'coloredBlur'});
+  glowFilter.appendChild(blur);
+  const merge = createSVGEl('feMerge');
+  merge.appendChild(createSVGEl('feMergeNode', {'in':'coloredBlur'}));
+  merge.appendChild(createSVGEl('feMergeNode', {'in':'SourceGraphic'}));
+  glowFilter.appendChild(merge);
+  defs.appendChild(glowFilter);
+
+  // Hover glow filter (stronger)
+  const glowHover = createSVGEl('filter', {id:'nodeGlowHover', x:'-50%', y:'-50%', width:'200%', height:'200%'});
+  const blurH = createSVGEl('feGaussianBlur', {stdDeviation:'5', result:'coloredBlur'});
+  glowHover.appendChild(blurH);
+  const mergeH = createSVGEl('feMerge');
+  mergeH.appendChild(createSVGEl('feMergeNode', {'in':'coloredBlur'}));
+  mergeH.appendChild(createSVGEl('feMergeNode', {'in':'SourceGraphic'}));
+  glowHover.appendChild(mergeH);
+  defs.appendChild(glowHover);
+
+  svg.appendChild(defs);
+
+  const gLinks = createSVGEl('g');
+  const gNodes = createSVGEl('g');
+  svg.appendChild(gLinks); svg.appendChild(gNodes);
+
+  const linkEls = links.map(l => {
+    const line = createSVGEl('line', {class:'link', 'marker-end':'url(#arrow)'});
+    line.dataset.source = l.source; line.dataset.target = l.target;
+    gLinks.appendChild(line);
+    return {el:line, source:l.source, target:l.target};
+  });
+
+  const nodeEls = nodes.map(n => {
+    const g = createSVGEl('g', {class:'node'});
+    g.dataset.id = n.id;
+    const circle = createSVGEl('circle', {r:n.r, fill:n.color, stroke:n.color, 'stroke-opacity':'0.3'});
+    const text = createSVGEl('text', {dy:n.r+16});
+    text.textContent = modules[n.id].label.replace('commands/','').replace('.py','');
+    g.appendChild(circle); g.appendChild(text);
+    gNodes.appendChild(g);
+
+    g.addEventListener('click', e => { e.stopPropagation(); showModuleDetail(n.id); highlightConnections(n.id); });
+    let dragging = false;
+    g.addEventListener('mousedown', e => { dragging = true; n._fixed = true; wakeSimulation(); e.preventDefault(); });
+    document.addEventListener('mousemove', e => {
+      if (!dragging) return;
+      const rect = svg.getBoundingClientRect();
+      n.x = (e.clientX - rect.left) * (W / rect.width);
+      n.y = (e.clientY - rect.top) * (H / rect.height);
+    });
+    document.addEventListener('mouseup', () => { if (dragging) { dragging = false; n._fixed = false; } });
+    return {el:g, node:n};
+  });
+
+  svg.addEventListener('click', () => {
+    nodeEls.forEach(ne => ne.el.classList.remove('dimmed'));
+    linkEls.forEach(le => { le.el.classList.remove('highlighted','dimmed'); });
+    document.getElementById('graph-detail').classList.remove('visible');
+  });
+
+  function highlightConnections(id) {
+    const connected = new Set([id]);
+    linkEls.forEach(l => { if (l.source===id||l.target===id) { connected.add(l.source); connected.add(l.target); } });
+    nodeEls.forEach(ne => ne.el.classList.toggle('dimmed', !connected.has(ne.node.id)));
+    linkEls.forEach(le => { const c = le.source===id||le.target===id; le.el.classList.toggle('highlighted',c); le.el.classList.toggle('dimmed',!c); });
+  }
+
+  function showModuleDetail(id) {
+    const m = modules[id];
+    const detail = document.getElementById('graph-detail');
+    // Clear and rebuild safely
+    detail.replaceChildren();
+    const h3 = createEl('h3', null, m.label); detail.appendChild(h3);
+    const purpose = createEl('div', 'purpose', m.purpose); detail.appendChild(purpose);
+    if (m.deps && m.deps.length) {
+      detail.appendChild(createEl('div', 'section-title', 'Dependencies'));
+      const ul = createEl('ul'); m.deps.forEach(d => { const li = createEl('li', 'dep', modules[d]?modules[d].label:d); ul.appendChild(li); }); detail.appendChild(ul);
+    }
+    if (m.exports && m.exports.length) {
+      detail.appendChild(createEl('div', 'section-title', 'Key Exports'));
+      const ul = createEl('ul'); m.exports.forEach(e => { const li = createEl('li', 'export', e); ul.appendChild(li); }); detail.appendChild(ul);
+    }
+    if (m.classes && m.classes.length) {
+      detail.appendChild(createEl('div', 'section-title', 'Classes / Types'));
+      const ul = createEl('ul'); m.classes.forEach(c => { const li = createEl('li', 'cls', c); ul.appendChild(li); }); detail.appendChild(ul);
+    }
+    const dependents = [];
+    Object.keys(modules).forEach(k => { if ((modules[k].deps||[]).includes(id)) dependents.push(modules[k].label); });
+    if (dependents.length) {
+      detail.appendChild(createEl('div', 'section-title', 'Used By'));
+      const ul = createEl('ul'); dependents.forEach(d => { const li = createEl('li'); li.style.color = 'var(--text-muted)'; li.textContent = d; ul.appendChild(li); }); detail.appendChild(ul);
+    }
+    // Cross-link: which commands use this module
+    const cmdsUsing = [];
+    Object.entries(commandData).forEach(([cmdId, cmd]) => {
+      if (cmd.modules.includes(id)) cmdsUsing.push({ id: cmdId, title: cmd.title });
+    });
+    if (cmdsUsing.length) {
+      detail.appendChild(createEl('div', 'section-title', 'Commands'));
+      const ul = createEl('ul');
+      cmdsUsing.forEach(c => {
+        const li = createEl('li');
+        li.textContent = c.title;
+        li.style.cssText = 'color:var(--purple);cursor:pointer;';
+        li.addEventListener('click', () => {
+          // Switch to commands tab and select this command
+          const tabsEl = document.getElementById('main-tabs');
+          tabsEl.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+          document.querySelectorAll('.view').forEach(x => x.classList.remove('active'));
+          const cmdTab = tabsEl.querySelector('[data-view="commands-view"]');
+          if (cmdTab) cmdTab.classList.add('active');
+          document.getElementById('commands-view').classList.add('active');
+          document.querySelectorAll('.cmd-item').forEach(i => i.classList.remove('active'));
+          const target = document.querySelector('.cmd-item[data-cmd="' + c.id + '"]');
+          if (target) { target.classList.add('active'); }
+          renderCommand(c.id);
+        });
+        ul.appendChild(li);
+      });
+      detail.appendChild(ul);
+    }
+    detail.classList.add('visible');
+  }
+
+  const layerY = { foundation: H*0.82, workspace: H*0.65, display: H*0.48, engine: H*0.35, commands: H*0.2, cli: H*0.08 };
+  let _simRunning = false;
+  function wakeSimulation() { if (!_simRunning) { _simRunning = true; requestAnimationFrame(simulate); } }
+  function simulate() {
+    nodes.forEach(n => { if (n._fixed) return; n.vx += (W/2-n.x)*0.001; n.vy += (H/2-n.y)*0.001; });
+    for (let i=0;i<nodes.length;i++) for (let j=i+1;j<nodes.length;j++) {
+      let dx=nodes[j].x-nodes[i].x, dy=nodes[j].y-nodes[i].y, dist=Math.sqrt(dx*dx+dy*dy)||1;
+      let f=8000/(dist*dist), fx=(dx/dist)*f, fy=(dy/dist)*f;
+      if (!nodes[i]._fixed) { nodes[i].vx-=fx; nodes[i].vy-=fy; }
+      if (!nodes[j]._fixed) { nodes[j].vx+=fx; nodes[j].vy+=fy; }
+    }
+    links.forEach(l => {
+      const s=nodeMap[l.source],t=nodeMap[l.target]; let dx=t.x-s.x,dy=t.y-s.y,dist=Math.sqrt(dx*dx+dy*dy)||1;
+      let f=(dist-120)*0.01,fx=(dx/dist)*f,fy=(dy/dist)*f;
+      if (!s._fixed) { s.vx+=fx; s.vy+=fy; } if (!t._fixed) { t.vx-=fx; t.vy-=fy; }
+    });
+    nodes.forEach(n => { if (n._fixed) return; const ty=layerY[modules[n.id].category]||H/2; n.vy+=(ty-n.y)*0.02; });
+    let totalMovement = 0;
+    nodes.forEach(n => { if (n._fixed) return; n.vx*=0.6; n.vy*=0.6; n.x+=n.vx*0.3; n.y+=n.vy*0.3; n.x=Math.max(40,Math.min(W-40,n.x)); n.y=Math.max(40,Math.min(H-40,n.y)); totalMovement += Math.abs(n.vx) + Math.abs(n.vy); });
+    nodeEls.forEach(ne => ne.el.setAttribute('transform', 'translate('+ne.node.x+','+ne.node.y+')'));
+    linkEls.forEach(le => { const s=nodeMap[le.source],t=nodeMap[le.target]; le.el.setAttribute('x1',s.x); le.el.setAttribute('y1',s.y); le.el.setAttribute('x2',t.x); le.el.setAttribute('y2',t.y); });
+    if (totalMovement > 0.5) { requestAnimationFrame(simulate); } else { _simRunning = false; }
+  }
+  wakeSimulation();
+}
+
+// ===== COMMANDS VIEW =====
+function renderCommand(cmdId) {
+  const cmd = commandData[cmdId]; if (!cmd) return;
+  const el = document.getElementById('cmd-content');
+  el.replaceChildren();
+
+  const h2 = createEl('h2'); const code = createEl('code', null, cmd.title); h2.appendChild(code); el.appendChild(h2);
+  el.appendChild(createEl('div', 'cmd-subtitle', cmd.subtitle));
+
+  if (cmd.usesSetup) {
+    const note = createEl('div'); note.style.cssText = 'margin-bottom:16px;padding:8px 14px;border-radius:6px;background:rgba(167,139,250,0.06);border:1px solid rgba(167,139,250,0.12);font-size:11px;color:var(--purple);font-weight:300;letter-spacing:0.01em;';
+    note.textContent = 'Uses setup_command() for shared config/stack/target initialization';
+    el.appendChild(note);
+  }
+
+  const flowLabel = createEl('div', null, 'Execution Flow');
+  flowLabel.style.cssText = 'margin-bottom:10px;font-size:9px;text-transform:uppercase;letter-spacing:0.12em;color:var(--text-muted);font-weight:500;';
+  el.appendChild(flowLabel);
+
+  cmd.steps.forEach(step => {
+    const div = createEl('div', 'flow-step ' + step.type);
+    div.appendChild(createEl('h4', null, step.title));
+    const p = createEl('p'); p.textContent = step.desc; div.appendChild(p);
+    el.appendChild(div);
+  });
+
+  if (cmd.flags.length) {
+    const flagDiv = createEl('div', 'cmd-flags');
+    flagDiv.appendChild(createEl('h3', null, 'Flags'));
+    cmd.flags.forEach(f => flagDiv.appendChild(createEl('span', 'flag', f)));
+    el.appendChild(flagDiv);
+  }
+
+  const modsDiv = createEl('div', 'flow-modules');
+  const label = createEl('span', null, 'Modules touched:');
+  label.style.cssText = 'font-size:9px;color:var(--text-muted);margin-right:6px;text-transform:uppercase;letter-spacing:0.08em;font-weight:500;';
+  modsDiv.appendChild(label);
+  cmd.modules.forEach(m => {
+    const mod = modules[m];
+    const tag = createEl('span', 'tag active', mod ? mod.label.replace('commands/','').replace('.py','') : m);
+    tag.style.cursor = 'pointer';
+    tag.addEventListener('click', () => navigateToModule(mod ? mod.label : m + '.py'));
+    modsDiv.appendChild(tag);
+  });
+  el.appendChild(modsDiv);
+}
+
+function initCommands() {
+  document.querySelectorAll('.cmd-item').forEach(item => {
+    item.addEventListener('click', () => {
+      document.querySelectorAll('.cmd-item').forEach(i => i.classList.remove('active'));
+      item.classList.add('active');
+      renderCommand(item.dataset.cmd);
+    });
+  });
+  renderCommand('plan');
+}
+
+// ===== DATA FLOW VIEW =====
+function buildPipeline(stages) {
+  const div = createEl('div', 'pipeline');
+  stages.forEach((s, i) => {
+    const stage = createEl('div', 'pipe-stage');
+    stage.appendChild(createEl('h4', null, s.title));
+    stage.appendChild(createEl('div', 'module-name', s.module));
+    stage.appendChild(createEl('p', null, s.desc));
+    div.appendChild(stage);
+    if (i < stages.length - 1) {
+      const arrow = createEl('div', 'pipe-arrow');
+      // SVG arrow instead of text character
+      const arrowSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      arrowSvg.setAttribute('width', '20');
+      arrowSvg.setAttribute('height', '12');
+      arrowSvg.setAttribute('viewBox', '0 0 20 12');
+      const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      line.setAttribute('x1', '0'); line.setAttribute('y1', '6');
+      line.setAttribute('x2', '14'); line.setAttribute('y2', '6');
+      line.setAttribute('stroke', 'rgba(120,140,180,0.4)'); line.setAttribute('stroke-width', '1');
+      arrowSvg.appendChild(line);
+      const head = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      head.setAttribute('d', 'M 12 2 L 18 6 L 12 10');
+      head.setAttribute('stroke', 'rgba(120,140,180,0.4)'); head.setAttribute('stroke-width', '1');
+      head.setAttribute('fill', 'none');
+      arrowSvg.appendChild(head);
+      arrow.appendChild(arrowSvg);
+      div.appendChild(arrow);
+    }
+  });
+  return div;
+}
+
+function buildSection(title, items) {
+  const section = createEl('div', 'detail-section');
+  section.appendChild(createEl('h3', null, title));
+  items.forEach(text => { const p = createEl('p', null, text); section.appendChild(p); });
+  return section;
+}
+
+function buildPriorityList(title, items) {
+  const section = createEl('div', 'detail-section');
+  section.appendChild(createEl('h3', null, title));
+  const ol = createEl('ol', 'priority-list');
+  items.forEach(text => { const li = createEl('li', null, text); ol.appendChild(li); });
+  section.appendChild(ol);
+  return section;
+}
+
+function buildSecurityTable(title, headers, rows) {
+  const section = createEl('div', 'detail-section');
+  section.appendChild(createEl('h3', null, title));
+  const table = createEl('table', 'security-table');
+  const thead = createEl('tr');
+  headers.forEach(h => thead.appendChild(createEl('th', null, h)));
+  table.appendChild(thead);
+  rows.forEach(row => {
+    const tr = createEl('tr');
+    row.forEach(cell => { const td = createEl('td', null, cell); tr.appendChild(td); });
+    table.appendChild(tr);
+  });
+  section.appendChild(table);
+  return section;
+}
+
+const dfBuilders = {
+  'df-config': () => {
+    const frag = document.createDocumentFragment();
+    frag.appendChild(createEl('h2', null, 'Configuration Flow'));
+    frag.lastChild.style.cssText = 'margin-bottom:24px;font-weight:500;font-size:18px;';
+    frag.appendChild(buildPipeline([
+      { title: 'Project Discovery', module: 'config.py', desc: 'find_project_dir() checks cwd for tlumi.yaml.' },
+      { title: 'YAML Parsing', module: 'config.py', desc: 'load_config() reads tlumi.yaml via yaml.safe_load(). Validates types and sections.' },
+      { title: 'ProjectConfig', module: 'config.py', desc: 'Dataclass with __post_init__ validation: name regex, entry path check, absolute project_dir.' },
+      { title: 'Variable Merge', module: 'config.py', desc: 'merge_variables() layers: TLUMI_VAR_* < --var-file < --var. Returns a new ProjectConfig (frozen), re-running __post_init__ validation.' }
+    ]));
+    frag.appendChild(buildPriorityList('Variable Priority (lowest to highest)', [
+      'tlumi.yaml variables section (base defaults)',
+      'TLUMI_VAR_* environment variables (lowercased key after prefix)',
+      '--var-file PATH YAML files (each file overrides previous)',
+      '--var KEY=VALUE CLI flag (highest priority, visible in shell history)'
+    ]));
+    frag.appendChild(buildSection('Validation Rules', [
+      'Project name: regex ^[a-zA-Z][a-zA-Z0-9_-]*$',
+      'Entry path: no "..", not absolute, must resolve within project_dir',
+      'Variable keys: no colons (reserved for Pulumi namespaces)',
+      'Variable values: must be scalars (str, plain decimal int, or true/false); unquoted floats, timestamps, and non-decimal ints are rejected; no lists or dicts',
+      'YAML booleans: preserved as lowercase "true"/"false"',
+      'Secrets config: allow_unencrypted and warn_unencrypted must be actual booleans'
+    ]));
+    return frag;
+  },
+  'df-diffs': () => {
+    const frag = document.createDocumentFragment();
+    frag.appendChild(createEl('h2', null, 'Property Diff Pipeline'));
+    frag.lastChild.style.cssText = 'margin-bottom:24px;font-weight:500;font-size:18px;';
+    frag.appendChild(buildPipeline([
+      { title: 'SDK Patch', module: 'sdk_compat.py', desc: 'Import-time monkey-patch: source position suppression.' },
+      { title: 'Event Ingestion', module: 'engine.py', desc: 'on_preview() receives StepEventMetadata. Deduplicates replacements.' },
+      { title: 'Diff Extraction', module: 'diffs.py', desc: 'extract_property_diffs(): dual strategy using detailed_diff or old/new inputs.' },
+      { title: 'Sanitization', module: 'sanitize.py', desc: '_sanitize_value(): replaces secret/unknown sentinels. Depth-limited to 50.' },
+      { title: 'Formatting', module: 'diffs.py', desc: 'Expand/flatten values. Compact JSON or dotted paths. Truncate at 60 chars.' },
+      { title: 'Display', module: 'display.py', desc: 'format_diff_tree(): Rich Tree with inline or expanded rendering.' }
+    ]));
+    frag.appendChild(buildSection('Extraction Strategy', [
+      'CREATE: all meta.new.inputs shown as "add" entries',
+      'DELETE: all meta.old.inputs shown as "delete" entries',
+      'UPDATE/REPLACE with detailed_diff: uses patched SDK data, _get_nested() for value lookup',
+      'UPDATE/REPLACE fallback: compares old vs new inputs with one level of sub-key diffing'
+    ]));
+    frag.appendChild(buildSection('Sentinel Values', [
+      'Secret: sig=4dabf18193072939515e22adb298388d, val=1b47061264138c4ac30d75fd1eb44270 => (sensitive)',
+      'Unknown: UUID 04da6b54-80e4-46f7-96ec-b56ff0331ba9 => (known after apply)',
+      'Ciphertext: [secret] string => (sensitive)',
+      'Max depth (50): returns (sensitive) as safe default'
+    ]));
+    return frag;
+  },
+  'df-state': () => {
+    const frag = document.createDocumentFragment();
+    frag.appendChild(createEl('h2', null, 'State Flow'));
+    frag.lastChild.style.cssText = 'margin-bottom:24px;font-weight:500;font-size:18px;';
+    frag.appendChild(buildPipeline([
+      { title: 'Export', module: 'workspace.py', desc: 'safe_export_stack() wraps stack.export_stack(). Returns Deployment.' },
+      { title: 'Resolution', module: 'resolve.py', desc: 'resolve_resource() matches by name, type::name, or full URN.' },
+      { title: 'Mutation', module: 'state.py', desc: 'state rm: removes + cleans 5 ref types. state push: replaces entirely.' },
+      { title: 'Import', module: 'workspace.py', desc: 'stack.import_stack() writes modified state back.' }
+    ]));
+    frag.appendChild(buildSection('Backup System', [
+      'state rm, state mv, and state push create backups before mutation.',
+      'Location: .tlumi/backups/state_{op}_{timestamp}.json',
+      'Format: {"version": N, "deployment": {...}} (full restorable)',
+      'Source: export_stack_no_secrets() (plain stack export, NOT --show-secrets), so secrets stay ciphertext; decrypted plaintext is never written to disk, even with TLUMI_SECRETS_PASSPHRASE set. Restores identically (salt is in deployment.secrets_providers).',
+      'Written via _write_secure(): O_CREAT|O_EXCL + 0o600 (atomic, symlink-safe)',
+      '_rotate_backups() keeps last 10 files per op. Best-effort deletion.'
+    ]));
+    frag.appendChild(buildSection('Reference Cleanup (state rm)', [
+      'parent: cleared if it references the removed URN',
+      'dependencies: URN removed from list, empty list deleted',
+      'provider: matched via _provider_matches(p, urn) which checks p == urn or p.startswith(urn + "::")',
+      'deletedWith: cleared if it references the removed URN (scalar URN, like parent)',
+      'propertyDependencies: URN removed from each property\'s dependency list'
+    ]));
+    return frag;
+  },
+  'df-secrets': () => {
+    const frag = document.createDocumentFragment();
+    frag.appendChild(createEl('h2', null, 'Secrets Handling'));
+    frag.lastChild.style.cssText = 'margin-bottom:24px;font-weight:500;font-size:18px;';
+    frag.appendChild(buildPipeline([
+      { title: 'Configuration', module: 'config.py', desc: 'SecretsConfig: warn_unencrypted, allow_unencrypted.' },
+      { title: 'Passphrase', module: 'workspace.py', desc: 'TLUMI_SECRETS_PASSPHRASE env var or allow_unencrypted. ConfigError otherwise.' },
+      { title: 'Detection', module: 'sanitize.py', desc: '_sanitize_value() and _unwrap_secrets() walk sentinel patterns.' },
+      { title: 'Masking', module: 'sanitize.py', desc: '_sanitize_value() replaces sentinels with (sensitive) or (known after apply).' }
+    ]));
+    frag.appendChild(buildPriorityList('Passphrase Flow in get_stack()', [
+      'TLUMI_SECRETS_PASSPHRASE set? Use as PULUMI_CONFIG_PASSPHRASE',
+      'Not set but allow_unencrypted: true? Empty passphrase with info notice',
+      'Neither? ConfigError with hint'
+    ]));
+    frag.appendChild(buildSection('Display Masking Points', [
+      'Diff pipeline: _format_diff_value() detects sentinels inline',
+      'state show / show: _sanitize_value() on inputs/outputs unless --show-secrets',
+      'apply outputs: masked_outputs_from_state(safe_export_stack()) sanitizes secret-sig wrappers in exported state (does NOT trust OutputValue.secret); --show-secrets uses stack.outputs() plaintext.',
+      'print_outputs(): pure renderer of an already-masked mapping (no secret inspection)',
+      'CLI warning: merge_variables() warns when --var keys match sensitive patterns'
+    ]));
+    return frag;
+  },
+  'df-uv': () => {
+    const frag = document.createDocumentFragment();
+    frag.appendChild(createEl('h2', null, 'uv + Dependency Management'));
+    frag.lastChild.style.cssText = 'margin-bottom:24px;font-weight:500;font-size:18px;';
+    frag.appendChild(buildPipeline([
+      { title: 'Discovery', module: 'uv.py', desc: 'ensure_uv(): PATH first, then shared cache, then download.' },
+      { title: 'Download', module: 'uv.py', desc: 'GitHub release with SHA-256 verification. Platform-aware.' },
+      { title: 'Venv', module: 'uv.py', desc: 'create_venv(): uv venv (no pip). run_install(): uv pip install --python.' },
+      { title: 'Commands', module: 'deps.py', desc: 'deps add: validate + normalize + write + install. deps install: from file.' }
+    ]));
+    frag.appendChild(buildSection('Checksum Verification', [
+      '_verify_checksum() downloads .sha256 sidecar from GitHub release.',
+      'Computes SHA-256 of archive, compares. On mismatch: deletes archive and raises WorkspaceError.'
+    ]));
+    frag.appendChild(buildSection('Package Validation (deps add)', [
+      'Rejects packages starting with - (argument injection)',
+      'Rejects packages containing \\n or \\r (control character injection)',
+      '_normalize_name() uses packaging.requirements.Requirement for proper handling'
+    ]));
+    return frag;
+  },
+  'df-security': () => {
+    const frag = document.createDocumentFragment();
+    frag.appendChild(createEl('h2', null, 'Security Boundaries'));
+    frag.lastChild.style.cssText = 'margin-bottom:24px;font-weight:500;font-size:18px;';
+    frag.appendChild(buildSecurityTable('Symlink Checks', ['Location', 'Target', 'Purpose'], [
+      ['workspace.py', '.tlumi + subdirs', 'Prevents state directory redirection'],
+      ['init.py', '.tlumi, tlumi.yaml, infra.py, requirements.txt, .gitignore', 'Prevents template writes to symlinked files'],
+      ['deps.py', 'requirements.txt', 'Prevents appending to symlinked deps file'],
+      ['clean.py', '.tlumi root + all children', 'Prevents recursive deletion following symlinks']
+    ]));
+    frag.appendChild(buildSection('Entry File Loading', [
+      'spec_from_file_location (exact path), NOT import_module (sys.path search)',
+      'Module name namespaced as _tlumi_entry.<stem> to prevent stdlib collisions',
+      'sys.path.append() (not insert(0)) gives stdlib priority',
+      'Always fresh-loads (no importlib.reload())'
+    ]));
+    frag.appendChild(buildSecurityTable('Secure File Operations', ['Operation', 'Mechanism'], [
+      ['Backup writes', 'O_CREAT|O_EXCL + 0o600 via _write_secure()'],
+      ['Directory creation', 'mkdir(mode=0o700) everywhere'],
+      ['Rich markup injection', 'escape() on resource names and error messages'],
+      ['Backend URL display', '_mask_backend_url() replaces password with ***'],
+      ['Input sanitization', 'Package name validation, path traversal checks, key colon rejection']
+    ]));
+    return frag;
+  }
+};
+
+function initDataFlow() {
+  const content = document.getElementById('df-content');
+  document.querySelectorAll('.df-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.df-tab').forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      content.replaceChildren();
+      const builder = dfBuilders[tab.dataset.panel];
+      if (builder) content.appendChild(builder());
+    });
+  });
+  content.appendChild(dfBuilders['df-config']());
+}
+
+// ===== TYPES VIEW =====
+function initTypes() {
+  const types = [
+    { name:'ProjectConfig', module:'config.py', kind:'dataclass', fields:['name: str','project_dir: Path','entry: str','backend: BackendConfig','secrets: SecretsConfig','variables: dict[str, str]'], methods:['tlumi_dir','state_dir','cache_dir','pulumi_home','venv_dir','venv_python','entry_path','backend_url()'], notes:'__post_init__ validates name regex, rejects ".." in entry, requires absolute project_dir' },
+    { name:'BackendConfig', module:'config.py', kind:'dataclass', fields:['url: str | None'], methods:['resolved_url(project_dir)'] },
+    { name:'SecretsConfig', module:'config.py', kind:'dataclass', fields:['warn_unencrypted: bool = True','allow_unencrypted: bool = False'] },
+    { name:'PropertyChange', module:'diffs.py', kind:'dataclass', fields:['path: str','kind: Literal["add","update","delete"]','old_value: str | None','new_value: str | None','forces_replacement: bool'], methods:['.add(path, value)','.delete(path, value)','.update(path, old, new)'], notes:'Frozen + slots. __post_init__ rejects add+old_value, delete+new_value.' },
+    { name:'RunContext', module:'cli.py', kind:'dataclass', fields:['verbose: bool = False','json_output: bool = False'], notes:'Stored in typer.Context via ctx.ensure_object()' },
+    { name:'Diagnostic', module:'errors.py', kind:'namedtuple', fields:['resource: str','message: str'] },
+    { name:'_OpDisplay', module:'engine.py', kind:'namedtuple', fields:['symbol: str','in_progress: str','past_tense: str','future: str'] },
+    { name:'LiveDisplay', module:'display.py', kind:'protocol', fields:['is_started: bool','console: Console'], methods:['update(renderable)'] },
+    { name:'EventHandler', module:'engine.py', kind:'class', fields:['quiet: bool','errors: list[Diagnostic]','property_diffs: dict[str, list[PropertyChange]]','callback_errors: int'], methods:['start_live()','on_preview(event)','on_update(event)'] },
+    { name:'_WindowContext', module:'display.py', kind:'class', fields:['_live: Live','_inner: Renderable | None'], methods:['set_inner()','clear_inner()','pause()','resume()','__enter__','__exit__'] },
+    { name:'WindowLiveProxy', module:'display.py', kind:'class', fields:['_window: _WindowContext'], methods:['update(renderable)','is_started','console'], notes:'Duck-types as Live for engine.py' },
+    { name:'TlumiError', module:'errors.py', kind:'exception', fields:['message: str','hint: str | None'] },
+    { name:'ConfigError', module:'errors.py', kind:'exception', fields:['(inherits TlumiError)'] },
+    { name:'WorkspaceError', module:'errors.py', kind:'exception', fields:['(inherits TlumiError)'] },
+    { name:'ProjectNotFoundError', module:'errors.py', kind:'exception', fields:['(hardcoded message + hint)'] },
+    { name:'EngineError', module:'errors.py', kind:'exception', fields:['message: str','diagnostics: list[Diagnostic]','full_output: str','hint: str | None'] }
+  ];
+
+  const kindColors = { dataclass: 'var(--green)', namedtuple: 'var(--purple)', protocol: 'var(--cyan)', exception: 'var(--red)', class: 'var(--text-muted)' };
+  const container = document.getElementById('types-view');
+  types.forEach((t, i) => {
+    const card = createEl('div', 'type-card');
+    card.style.animationDelay = (i * 0.03) + 's';
+    // Set corner accent color based on kind
+    card.style.setProperty('--kind-color', kindColors[t.kind] || 'var(--text-muted)');
+    card.appendChild(createEl('h3', null, t.name));
+    card.appendChild(createEl('div', 'module-label', t.module));
+    card.appendChild(createEl('span', 'type-kind ' + t.kind, t.kind));
+    if (t.notes) { const n = createEl('p', null, t.notes); n.style.cssText = 'font-size:11px;color:var(--text-muted);margin-bottom:12px;line-height:1.5;font-weight:300;'; card.appendChild(n); }
+    const ul = createEl('ul', 'field-list');
+    t.fields.forEach(f => {
+      const li = createEl('li');
+      const parts = f.split(':');
+      const fname = createEl('span', 'fname', parts[0]);
+      li.appendChild(fname);
+      if (parts.length > 1) { const ftype = createEl('span', 'ftype', ': ' + parts.slice(1).join(':')); li.appendChild(ftype); }
+      ul.appendChild(li);
+    });
+    card.appendChild(ul);
+    if (t.methods) {
+      card.appendChild(createEl('div', 'methods-label', 'Methods / Properties'));
+      t.methods.forEach(m => card.appendChild(createEl('div', 'method', m)));
+    }
+    container.appendChild(card);
+  });
+}
+
+// ===== ERRORS VIEW =====
+function initErrors() {
+  const container = document.getElementById('errors-view');
+  const heading = createEl('h2', null, 'Error Class Hierarchy');
+  heading.style.cssText = 'margin-bottom:24px;font-weight:500;font-size:18px;';
+  container.appendChild(heading);
+
+  const tree = createEl('div', 'error-tree');
+  const errorNodes = [
+    { indent: '', cls: 'root', name: 'Exception', desc: '' },
+    { indent: '  ', cls: '', name: '|', desc: '', isConnector: true },
+    { indent: '  ', cls: 'base', name: 'TlumiError', desc: 'message, hint' },
+    { indent: '  ', cls: 'child', name: 'ConfigError', desc: 'bad config, invalid syntax, entry issues', prefix: '|--- ' },
+    { indent: '  ', cls: 'child', name: 'WorkspaceError', desc: 'state issues, CLI install failures, uv errors', prefix: '|--- ' },
+    { indent: '  ', cls: 'child', name: 'ProjectNotFoundError', desc: 'hardcoded message + hint', prefix: '|--- ' },
+    { indent: '  ', cls: 'child', name: 'EngineError', desc: 'diagnostics, full_output', prefix: '|--- ' }
+  ];
+
+  const errorInfo = {
+    'TlumiError': { fields: ['message: str', 'hint: str | None'], raisedBy: ['All subclasses inherit these fields','Caught at CLI boundary in _run()'], handling: 'Rich mode: print_error(message, hint). JSON mode: _emit_json_error().' },
+    'ConfigError': { fields: ['(inherits TlumiError)'], raisedBy: ['config.py: invalid YAML, bad project name, entry path traversal','validate.py: SyntaxError in entry file','workspace.py: missing passphrase + allow_unencrypted=false','init.py: template write failures'] },
+    'WorkspaceError': { fields: ['(inherits TlumiError)'], raisedBy: ['workspace.py: CLI install, safe_export_stack() failures','state.py: resource not found, backup write failures','uv.py: download failures, checksum mismatches','resolve.py: ambiguous resource match, empty URN'] },
+    'ProjectNotFoundError': { fields: ['"No tlumi.yaml found in the current directory."', 'Hint: "Run \'tlumi init\' to create..."'], raisedBy: ['config.py: find_project_dir() fails'] },
+    'EngineError': { fields: ['message: str','diagnostics: list[Diagnostic]','full_output: str','hint: str | None'], raisedBy: ['engine.py: catch_engine_errors() converts CommandError','Used by plan, apply, destroy, refresh, import'], handling: '_handle_engine_error() prints structured diagnostics. _detect_hint() matches known patterns.' }
+  };
+
+  const detailDiv = createEl('div', 'error-detail');
+  detailDiv.id = 'error-detail-panel';
+
+  let activeErrorDetail = null;
+
+  errorNodes.forEach(n => {
+    const line = createEl('div');
+    if (n.isConnector) {
+      const conn = createEl('span', 'connector', n.indent + n.name);
+      line.appendChild(conn);
+    } else {
+      if (n.indent) line.appendChild(createEl('span', 'connector', n.indent + (n.prefix || '')));
+      const label = createEl('span', 'node-label ' + n.cls, n.name);
+      if (errorInfo[n.name]) {
+        label.style.cursor = 'pointer';
+        label.addEventListener('click', () => {
+          // Remove any existing inline detail
+          if (activeErrorDetail) { activeErrorDetail.remove(); activeErrorDetail = null; }
+          const info = errorInfo[n.name];
+          const inlineDetail = createEl('div', 'error-detail visible');
+          inlineDetail.style.cssText = 'margin:8px 0 8px 24px;animation:fadeSlideIn 0.2s ease-out;';
+          inlineDetail.appendChild(createEl('h3', null, n.name));
+          info.fields.forEach(f => {
+            const field = createEl('div', 'field');
+            field.appendChild(createEl('div', 'field-value', f));
+            inlineDetail.appendChild(field);
+          });
+          if (info.handling) {
+            const hd = createEl('div'); hd.style.cssText = 'margin-top:12px;padding:8px 12px;border-radius:6px;background:var(--bg-tertiary);font-size:11px;color:var(--text-muted);font-weight:300;';
+            hd.textContent = info.handling; inlineDetail.appendChild(hd);
+          }
+          if (info.raisedBy) {
+            const rb = createEl('div', 'raised-by');
+            rb.appendChild(createEl('h4', null, 'Raised By'));
+            const ul = createEl('ul');
+            info.raisedBy.forEach(r => ul.appendChild(createEl('li', null, r)));
+            rb.appendChild(ul); inlineDetail.appendChild(rb);
+          }
+          // Insert right after this line in the tree
+          line.after(inlineDetail);
+          activeErrorDetail = inlineDetail;
+        });
+      }
+      line.appendChild(label);
+      if (n.desc) {
+        const desc = createEl('span'); desc.style.cssText = 'color:var(--text-muted);font-size:11px;margin-left:12px;font-family:var(--font-body);font-weight:300;';
+        desc.textContent = n.desc; line.appendChild(desc);
+      }
+    }
+    tree.appendChild(line);
+  });
+  container.appendChild(tree);
+}
+
+// ===== FILE LAYOUT VIEW =====
+function initLayout() {
+  const container = document.getElementById('layout-view');
+  const heading = createEl('h2', null, 'Project Structure');
+  heading.style.cssText = 'margin-bottom:24px;font-weight:500;font-size:18px;';
+  container.appendChild(heading);
+
+  const tree = createEl('div', 'file-tree');
+  const fileDetailDiv = createEl('div', 'file-detail');
+  fileDetailDiv.id = 'file-detail-panel';
+
+  const files = [
+    { indent: '', type: 'dir', name: 'src/tlumi/', desc: '' },
+    { indent: '  \u251c\u2500\u2500 ', type: 'file', name: '__init__.py', id: '__init__', desc: 'Package root, __version__' },
+    { indent: '  \u251c\u2500\u2500 ', type: 'file', name: '__main__.py', id: '__main__', desc: 'python -m tlumi entry point' },
+    { indent: '  \u251c\u2500\u2500 ', type: 'file', name: 'cli.py', id: 'cli', desc: 'Typer app, 20+ commands, error boundaries, Live window' },
+    { indent: '  \u251c\u2500\u2500 ', type: 'file', name: 'config.py', id: 'config', desc: 'YAML parsing, ProjectConfig, find_project_dir, merge_variables' },
+    { indent: '  \u251c\u2500\u2500 ', type: 'file', name: 'workspace.py', id: 'workspace', desc: 'Pulumi Automation API: get_stack, CLI install, program loading' },
+    { indent: '  \u251c\u2500\u2500 ', type: 'file', name: 'engine.py', id: 'engine', desc: 'EventHandler: on_preview, on_update, catch_engine_errors' },
+    { indent: '  \u251c\u2500\u2500 ', type: 'file', name: 'display.py', id: 'display', desc: 'Rich console, themes, Live display, diff trees, print helpers' },
+    { indent: '  \u251c\u2500\u2500 ', type: 'file', name: 'diffs.py', id: 'diffs', desc: 'PropertyChange, extract/expand/format diffs' },
+    { indent: '  \u251c\u2500\u2500 ', type: 'file', name: 'sanitize.py', id: 'sanitize', desc: 'Sentinel detection, _sanitize_value()' },
+    { indent: '  \u251c\u2500\u2500 ', type: 'file', name: 'sdk_compat.py', id: 'sdk_compat', desc: 'SDK monkey-patch: source position suppression' },
+    { indent: '  \u251c\u2500\u2500 ', type: 'file', name: 'resolve.py', id: 'resolve', desc: 'URN parsing, resource resolution, target resolution' },
+    { indent: '  \u251c\u2500\u2500 ', type: 'file', name: 'errors.py', id: 'errors', desc: 'TlumiError hierarchy, Diagnostic NamedTuple' },
+    { indent: '  \u251c\u2500\u2500 ', type: 'file', name: 'uv.py', id: 'uv', desc: 'uv binary: find/download/verify, venv, install' },
+    { indent: '  \u251c\u2500\u2500 ', type: 'file', name: 'redact.py', id: 'redact', desc: 'Credential redaction for stderr/diagnostic strings' },
+    { indent: '  \u251c\u2500\u2500 ', type: 'file', name: '_safeio.py', id: 'safeio', desc: 'Symlink-safe file/dir primitives (O_NOFOLLOW writes, lstat-checked mkdir)' },
+    { indent: '  \u251c\u2500\u2500 ', type: 'dir', name: 'commands/', desc: '' },
+    { indent: '  \u2502   \u251c\u2500\u2500 ', type: 'file', name: '_common.py', id: '_common', desc: 'setup_command() shared boilerplate' },
+    { indent: '  \u2502   \u251c\u2500\u2500 ', type: 'file', name: 'init.py', id: 'init', desc: 'Project initialization with templates' },
+    { indent: '  \u2502   \u251c\u2500\u2500 ', type: 'file', name: 'plan.py', id: 'plan', desc: 'Preview changes (stack.preview)' },
+    { indent: '  \u2502   \u251c\u2500\u2500 ', type: 'file', name: 'apply.py', id: 'apply', desc: 'Apply changes (preview + stack.up)' },
+    { indent: '  \u2502   \u251c\u2500\u2500 ', type: 'file', name: 'destroy.py', id: 'destroy', desc: 'Destroy infrastructure (stack.destroy)' },
+    { indent: '  \u2502   \u251c\u2500\u2500 ', type: 'file', name: 'refresh.py', id: 'refresh', desc: 'Reconcile state (stack.refresh)' },
+    { indent: '  \u2502   \u251c\u2500\u2500 ', type: 'file', name: 'validate.py', id: 'validate', desc: 'Config + syntax validation' },
+    { indent: '  \u2502   \u251c\u2500\u2500 ', type: 'file', name: 'clean.py', id: 'clean', desc: 'Remove .tlumi/ (symlink-safe)' },
+    { indent: '  \u2502   \u251c\u2500\u2500 ', type: 'file', name: 'fmt.py', id: 'fmt', desc: 'Format via ruff' },
+    { indent: '  \u2502   \u251c\u2500\u2500 ', type: 'file', name: 'output.py', id: 'output', desc: 'Stack outputs display' },
+    { indent: '  \u2502   \u251c\u2500\u2500 ', type: 'file', name: 'show.py', id: 'show', desc: 'Full state dump' },
+    { indent: '  \u2502   \u251c\u2500\u2500 ', type: 'file', name: 'deps.py', id: 'deps', desc: 'Package management (add/install/list)' },
+    { indent: '  \u2502   \u251c\u2500\u2500 ', type: 'file', name: 'state.py', id: 'state', desc: 'State ops (list/show/rm/pull/push)' },
+    { indent: '  \u2502   \u251c\u2500\u2500 ', type: 'file', name: 'import_cmd.py', id: 'import_cmd', desc: 'Import existing resources' },
+    { indent: '  \u2502   \u2514\u2500\u2500 ', type: 'file', name: 'cancel.py', id: 'cancel', desc: 'Release state lock' },
+    { indent: '  \u2514\u2500\u2500 ', type: 'dir', name: 'templates/', desc: 'Jinja2 .j2 templates for tlumi init' },
+    { indent: '', type: '', name: '', desc: '' },
+    { indent: '', type: 'dir', name: 'tests/', desc: '1000+ pytest tests' },
+    { indent: '  \u251c\u2500\u2500 ', type: 'file', name: 'helpers.py', desc: 'mock_state() for creating mock Pulumi state' },
+    { indent: '  \u2514\u2500\u2500 ', type: 'file', name: 'test_*.py', desc: 'One test file per module' },
+    { indent: '', type: '', name: '', desc: '' },
+    { indent: '', type: 'dir', name: 'examples/', desc: '' },
+    { indent: '  \u251c\u2500\u2500 ', type: 'dir', name: 'random/', desc: 'No-credentials demo (pulumi-random)' },
+    { indent: '  \u251c\u2500\u2500 ', type: 'dir', name: 'aws-s3/', desc: 'Minimal S3 bucket' },
+    { indent: '  \u251c\u2500\u2500 ', type: 'dir', name: 'azure-container-apps/', desc: 'Docker + ACR + Container App' },
+    { indent: '  \u2514\u2500\u2500 ', type: 'dir', name: 'azure-modular/', desc: 'ComponentResource components pattern' }
+  ];
+
+  files.forEach(f => {
+    if (!f.name && !f.indent) { tree.appendChild(createEl('div')); tree.lastChild.style.height = '12px'; return; }
+    const line = createEl('div');
+    if (f.indent) line.appendChild(createEl('span', 'connector', f.indent));
+    const nameSpan = createEl('span', f.type, f.name);
+    if (f.id && modules[f.id]) {
+      nameSpan.style.cursor = 'pointer';
+      nameSpan.addEventListener('click', () => {
+        const m = modules[f.id];
+        fileDetailDiv.replaceChildren();
+        fileDetailDiv.appendChild(createEl('h3', null, m.label));
+        const p = createEl('p'); p.style.cssText = 'color:var(--text-muted);margin-bottom:12px;font-weight:300;font-size:12px;'; p.textContent = m.purpose; fileDetailDiv.appendChild(p);
+        if (m.deps.length) {
+          const depLabel = createEl('div', null, 'Internal Dependencies');
+          depLabel.style.cssText = 'font-size:9px;text-transform:uppercase;color:var(--text-muted);margin-bottom:6px;letter-spacing:0.12em;font-weight:500;';
+          fileDetailDiv.appendChild(depLabel);
+          const depsDiv = createEl('div'); depsDiv.style.marginBottom = '12px';
+          m.deps.forEach(d => { const s = createEl('span', null, modules[d]?modules[d].label:d); s.style.cssText = 'font-family:var(--font-mono);font-size:11px;color:var(--cyan);margin-right:10px;'; depsDiv.appendChild(s); });
+          fileDetailDiv.appendChild(depsDiv);
+        }
+        if (m.exports.length) {
+          const expLabel = createEl('div', null, 'Exports');
+          expLabel.style.cssText = 'font-size:9px;text-transform:uppercase;color:var(--text-muted);margin-bottom:6px;letter-spacing:0.12em;font-weight:500;';
+          fileDetailDiv.appendChild(expLabel);
+          m.exports.forEach(e => { const d = createEl('div', null, e); d.style.cssText = 'font-family:var(--font-mono);font-size:11px;color:var(--green);padding:2px 0;'; fileDetailDiv.appendChild(d); });
+        }
+        fileDetailDiv.classList.add('visible');
+      });
+    }
+    line.appendChild(nameSpan);
+    if (f.desc) line.appendChild(createEl('span', 'annotation', f.desc));
+    tree.appendChild(line);
+  });
+  container.appendChild(tree);
+  container.appendChild(fileDetailDiv);
+}
+
+// ===== INIT =====
+initTabs();
+buildLayers();
+initCommands();
+initDataFlow();
+initTypes();
+initErrors();
+initLayout();
+</script>
+</body>
+</html>

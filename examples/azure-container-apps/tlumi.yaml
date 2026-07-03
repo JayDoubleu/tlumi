@@ -1,0 +1,20 @@
+# Azure Container Apps example
+#
+# Demonstrates the power of Python IaC: creating a container registry,
+# building + pushing a Docker image, and deploying a Container App,
+# all in a single `tlumi apply`. Try doing THAT in Terraform.
+
+project:
+  name: azure-container-apps-example
+  entry: infra.py
+
+secrets:
+  allow_unencrypted: true
+
+variables:
+  location: westeurope
+  environment: staging
+  log_retention_days: 60
+  app_cpu: "0.5"          # quoted: tlumi rejects unquoted decimals (YAML would rewrite 1.10 -> 1.1)
+  app_memory: 1.0Gi
+  max_replicas: 5

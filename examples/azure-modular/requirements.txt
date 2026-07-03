@@ -1,0 +1,2 @@
+# v2 is the deploy-tested major; bump to <4.0.0 only after re-running a full deploy.
+pulumi-azure-native>=2.0.0,<3.0.0
