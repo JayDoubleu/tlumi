@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `provider_config` block in `tlumi.yaml` for setting provider-namespaced Pulumi config (e.g. `azure-native:location: westeurope`), the complement to `variables` (which are set under the project namespace). Many real Pulumi programs need this; previously the only workaround was hand-editing internal Pulumi files.
+
 ## [0.1.0] - 2026-07-03
 
 Initial public release.

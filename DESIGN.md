@@ -210,12 +210,18 @@ secrets:                           # optional
   allow_unencrypted: false         # default: false (refuse if no passphrase)
   warn_unencrypted: true           # default: true (info-level notice once)
 
-variables:                         # passed as Pulumi config
+variables:                         # passed as Pulumi config under the project namespace
   environment: dev
   region: us-east-1
+
+provider_config:                   # optional; namespaced config passed to providers
+  azure-native:location: westeurope
+  aws:region: eu-west-1
 ```
 
 Validation enforced by `ProjectConfig.__post_init__`: name matches `[a-zA-Z][a-zA-Z0-9_-]*` (anchored with `\Z`, so a trailing newline is rejected), entry path has no `..` and is not absolute, variable keys have no `:` (reserved for Pulumi provider config namespaces). `load_config()` additionally enforces that `secrets` boolean fields are real bools (not `"false"` strings) and that null variable values are rejected rather than coerced to the string `"None"`.
+
+`variables` are set under the project's own namespace (`<project>:key`), so `pulumi.Config().require("region")` reads them. `provider_config` is the complement: its keys **must** be namespaced (`namespace:key`, e.g. `azure-native:location`) and are set verbatim so a provider receives its own config. Many real programs need this (an `azure-native` ResourceGroup with no explicit `location=` argument reads `azure-native:location`). Values follow the same scalar/lossy-YAML rules as variables; a namespace equal to the project name is rejected (it would collide with `variables`). Both are tracked in the `managed_config_keys.json` sidecar (`keys` and `provider_keys`) so stale entries are removed on the next run, while config tlumi never wrote is left untouched.
 
 ## Error model
 

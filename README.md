@@ -118,6 +118,7 @@ Python replaces most of Terraform's DSL constructs with standard language featur
 |---|---|
 | `locals { name = "..." }` | Python variables: `name = f"rg-{env}"` |
 | `variable` + `validation {}` | `--var` / `--var-file` / `TLUMI_VAR_*` + Python assertions |
+| `provider "azurerm" { ... }` | `provider_config:` in `tlumi.yaml` (e.g. `azure-native:location: westeurope`) |
 | `output {}` | `pulumi.export()` |
 | `module {}` | `ComponentResource` classes + Python imports |
 | `count` / `for_each` | Python loops and list comprehensions |

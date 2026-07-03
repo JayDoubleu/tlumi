@@ -940,7 +940,7 @@ def test_get_stack_no_sidecar_skips_removal(tmp_path, monkeypatch):
     mock_stack.remove_config.assert_not_called()
     # The sidecar is written after reconciliation so the NEXT run can clean up.
     sidecar = tmp_path / ".tlumi" / "cache" / "managed_config_keys.json"
-    assert json.loads(sidecar.read_text()) == {"keys": ["region"]}
+    assert json.loads(sidecar.read_text()) == {"keys": ["region"], "provider_keys": []}
 
 
 def test_get_stack_corrupt_sidecar_skips_removal(tmp_path, monkeypatch):
@@ -965,7 +965,7 @@ def test_get_stack_corrupt_sidecar_skips_removal(tmp_path, monkeypatch):
         get_stack(config)
 
     mock_stack.remove_config.assert_not_called()
-    assert json.loads(sidecar.read_text()) == {"keys": []}
+    assert json.loads(sidecar.read_text()) == {"keys": [], "provider_keys": []}
 
 
 def test_get_stack_non_utf8_sidecar_skips_removal(tmp_path, monkeypatch):
@@ -995,7 +995,7 @@ def test_get_stack_non_utf8_sidecar_skips_removal(tmp_path, monkeypatch):
         get_stack(config)  # must not raise UnicodeDecodeError
 
     mock_stack.remove_config.assert_not_called()
-    assert json.loads(sidecar.read_text()) == {"keys": []}
+    assert json.loads(sidecar.read_text()) == {"keys": [], "provider_keys": []}
 
 
 def test_get_stack_deeply_nested_sidecar_skips_removal(tmp_path, monkeypatch):
@@ -1020,7 +1020,7 @@ def test_get_stack_deeply_nested_sidecar_skips_removal(tmp_path, monkeypatch):
         get_stack(config)  # must not raise RecursionError
 
     mock_stack.remove_config.assert_not_called()
-    assert json.loads(sidecar.read_text()) == {"keys": []}
+    assert json.loads(sidecar.read_text()) == {"keys": [], "provider_keys": []}
 
 
 def test_get_stack_symlinked_sidecar_ignored(tmp_path, monkeypatch, caplog):

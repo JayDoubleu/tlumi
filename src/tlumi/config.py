@@ -61,6 +61,12 @@ class ProjectConfig:
     backend: BackendConfig = field(default_factory=BackendConfig)
     secrets: SecretsConfig = field(default_factory=SecretsConfig)
     variables: dict[str, str] = field(default_factory=dict)
+    # Provider-namespaced Pulumi config, e.g. {"azure-native:location": "westeurope"}.
+    # These are set verbatim on the stack (unlike ``variables``, which are set
+    # under the project namespace). This is the only sanctioned way to give a
+    # provider its config, which many real programs require (a ResourceGroup with
+    # no explicit location needs ``azure-native:location``).
+    provider_config: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         # Duplicates validation from load_config() to catch programmatic
@@ -92,6 +98,22 @@ class ProjectConfig:
                 "Variable keys must not contain ':'.",
                 hint="Colons are reserved for Pulumi provider config namespaces.",
             )
+        for k in self.provider_config:
+            if "\x00" in k:
+                raise ConfigError(
+                    "A provider_config key contains a NUL byte.",
+                    hint="Remove the embedded NUL (\\0); it cannot be passed to Pulumi.",
+                )
+            if not _PROVIDER_KEY_RE.match(k):
+                raise ConfigError(
+                    f"Invalid provider_config key: '{k}'",
+                    hint="Use 'namespace:key' form, e.g. azure-native:location.",
+                )
+            if k.split(":", 1)[0] == self.name:
+                raise ConfigError(
+                    f"provider_config key '{k}' uses the project's own namespace.",
+                    hint="Un-namespaced project settings go under 'variables:'.",
+                )
 
     @property
     def tlumi_dir(self) -> Path:
@@ -125,10 +147,16 @@ class ProjectConfig:
         return self.backend.resolved_url(self.project_dir)
 
 
-_KNOWN_TOP_KEYS = ("project", "backend", "secrets", "variables")
+_KNOWN_TOP_KEYS = ("project", "backend", "secrets", "variables", "provider_config")
 _KNOWN_PROJECT_KEYS = ("name", "entry")
 _KNOWN_BACKEND_KEYS = ("url",)
 _KNOWN_SECRETS_KEYS = ("allow_unencrypted", "warn_unencrypted")
+
+# A provider-namespaced Pulumi config key: '<namespace>:<key>', e.g.
+# 'azure-native:location', 'aws:region'. The namespace is a provider token
+# (letters/digits/hyphens, letter-initial); the remainder may itself be a
+# dotted/structured or nested-namespace key (e.g. 'aws:tags.env', 'aws:s3:opt').
+_PROVIDER_KEY_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9-]*:[A-Za-z0-9_.:-]+\Z")
 
 _YAML_INT_TAG = "tag:yaml.org,2002:int"
 _NON_DECIMAL_INT_TAG = "!tlumi/non-decimal-int"
@@ -521,6 +549,35 @@ def load_config(project_dir: Path | None = None) -> ProjectConfig:
             )
         variables[key_str] = _coerce_variable_value(key_str, v, "tlumi.yaml")
 
+    raw_provider = raw.get("provider_config", {}) or {}
+    if not isinstance(raw_provider, dict):
+        raise ConfigError("'provider_config' must be a mapping in tlumi.yaml.")
+    provider_config: dict[str, str] = {}
+    for k, v in raw_provider.items():
+        if type(k) is not str:
+            raise ConfigError(
+                f"provider_config key '{k}' in tlumi.yaml must be a quoted string.",
+                hint=f'YAML coerced it from a keyword/number; quote it, e.g. "{k}": value.',
+            )
+        key_str = str(k)
+        if ":" not in key_str:
+            raise ConfigError(
+                f"provider_config key '{key_str}' in tlumi.yaml has no namespace.",
+                hint="Use 'namespace:key', e.g. azure-native:location. "
+                "Un-namespaced project settings go under 'variables:'.",
+            )
+        if not _PROVIDER_KEY_RE.match(key_str):
+            raise ConfigError(
+                f"Invalid provider_config key '{key_str}' in tlumi.yaml.",
+                hint="Expected 'namespace:key', e.g. azure-native:location.",
+            )
+        if key_str.split(":", 1)[0] == name:
+            raise ConfigError(
+                f"provider_config key '{key_str}' uses the project's own namespace '{name}'.",
+                hint="Un-namespaced project settings go under 'variables:'.",
+            )
+        provider_config[key_str] = _coerce_variable_value(key_str, v, "tlumi.yaml")
+
     allow_unencrypted = _canonical_value(secrets_raw.get("allow_unencrypted", False))
     if not isinstance(allow_unencrypted, bool):
         raise ConfigError(
@@ -551,6 +608,7 @@ def load_config(project_dir: Path | None = None) -> ProjectConfig:
             allow_unencrypted=allow_unencrypted,
         ),
         variables=variables,
+        provider_config=provider_config,
     )
     return config
 
@@ -654,6 +712,7 @@ def merge_variables(
         backend=config.backend,
         secrets=config.secrets,
         variables=merged,
+        provider_config=config.provider_config,
     )
 
 

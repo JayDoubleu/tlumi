@@ -504,15 +504,15 @@ def _managed_keys_path(config: ProjectConfig) -> Path:
     return config.cache_dir / _MANAGED_KEYS_FILENAME
 
 
-def _read_managed_keys(config: ProjectConfig) -> set[str] | None:
-    """Read the sidecar of config keys tlumi wrote on a previous run.
+def _read_sidecar(config: ProjectConfig) -> dict | None:
+    """Read and JSON-parse the managed-config sidecar, or None if unusable.
 
-    Returns None when the sidecar is missing, unreadable, or malformed;
-    callers must then skip stale-key removal entirely. Failing to clean a
-    stale variable is safe but not self-healing: a key whose variable is
-    removed from tlumi.yaml while no sidecar exists is never recorded again,
-    so it stays in Pulumi config until removed manually. Deleting config
-    tlumi does not own is worse, so no sidecar still means no removal.
+    Returns None when the sidecar is missing, a symlink, unreadable, or not a
+    JSON object; callers then skip stale-key removal entirely. Failing to clean
+    a stale key is safe but not self-healing (a key whose variable is removed
+    from tlumi.yaml while no sidecar exists is never recorded again, so it stays
+    in Pulumi config until removed manually). Deleting config tlumi does not own
+    is worse, so no sidecar still means no removal.
     """
     path = _managed_keys_path(config)
     if path.is_symlink():
@@ -528,29 +528,80 @@ def _read_managed_keys(config: ProjectConfig) -> set[str] | None:
         _log.debug("Cannot read managed-config sidecar %s", path, exc_info=True)
         return None
     try:
-        keys = json.loads(raw)["keys"]
-    except (ValueError, TypeError, KeyError, RecursionError):
+        data = json.loads(raw)
+    except (ValueError, RecursionError):
         # RecursionError: a pathologically nested JSON file (e.g. an
         # attacker-shipped .tlumi/) is treated like any other corrupt sidecar.
         _log.debug("Malformed managed-config sidecar %s", path, exc_info=True)
         return None
-    if not isinstance(keys, list) or not all(isinstance(k, str) for k in keys):
-        _log.debug("Malformed managed-config sidecar %s (bad 'keys' shape)", path)
+    if not isinstance(data, dict):
+        _log.debug("Malformed managed-config sidecar %s (not a JSON object)", path)
         return None
-    return set(keys)
+    return data
 
 
-def _write_managed_keys(config: ProjectConfig, keys: set[str]) -> None:
+def _sidecar_key_set(data: dict, field: str, *, missing_is_empty: bool) -> set[str] | None:
+    """Extract a list-of-strings sidecar field as a set.
+
+    A malformed field (not a list of strings) returns None so the caller skips
+    that cleanup. A missing field returns an empty set when ``missing_is_empty``
+    (the field was simply never written, e.g. an older sidecar predating
+    ``provider_config`` -- there is genuinely nothing tlumi owns to remove) and
+    None otherwise (preserving the "no record means no removal" rule for the
+    bare-variable keys that every sidecar has always carried).
+    """
+    value = data.get(field)
+    if value is None:
+        return set() if missing_is_empty else None
+    if not isinstance(value, list) or not all(isinstance(k, str) for k in value):
+        _log.debug("Malformed managed-config sidecar field '%s'", field)
+        return None
+    return set(value)
+
+
+def _read_managed_keys(config: ProjectConfig) -> set[str] | None:
+    """Read the bare project-namespaced config keys tlumi wrote previously.
+
+    Returns None when the sidecar or its ``keys`` field is missing/malformed,
+    so callers skip stale-variable removal (no record means no removal).
+    """
+    data = _read_sidecar(config)
+    if data is None:
+        return None
+    return _sidecar_key_set(data, "keys", missing_is_empty=False)
+
+
+def _read_managed_provider_keys(config: ProjectConfig) -> set[str] | None:
+    """Read the provider-namespaced config keys tlumi wrote previously.
+
+    A sidecar predating ``provider_config`` has no ``provider_keys`` field; that
+    means tlumi owned no provider keys, so nothing is cleaned (empty set), not a
+    skip. Returns None only when the sidecar itself is missing/malformed.
+    """
+    data = _read_sidecar(config)
+    if data is None:
+        return None
+    return _sidecar_key_set(data, "provider_keys", missing_is_empty=True)
+
+
+def _write_managed_keys(
+    config: ProjectConfig,
+    keys: set[str],
+    provider_keys: set[str] | None = None,
+) -> None:
     """Record the config keys tlumi wrote, for the next run's cleanup.
 
-    Best-effort: a write failure means stale-key cleanup stays skipped until
-    a later run rewrites the sidecar (the safe direction), so warn instead
-    of failing the command. It is not a one-run skip: a variable removed
-    from tlumi.yaml while no sidecar exists is never recorded again, so its
-    config key is never cleaned automatically. The warning says so.
+    ``keys`` are bare project variables; ``provider_keys`` are namespaced
+    provider config (e.g. ``azure-native:location``). Best-effort: a write
+    failure means stale-key cleanup stays skipped until a later run rewrites the
+    sidecar (the safe direction), so warn instead of failing the command. It is
+    not a one-run skip: a key removed from tlumi.yaml while no sidecar exists is
+    never recorded again, so its config key is never cleaned automatically.
     """
     path = _managed_keys_path(config)
-    payload = json.dumps({"keys": sorted(keys)}) + "\n"
+    payload = (
+        json.dumps({"keys": sorted(keys), "provider_keys": sorted(provider_keys or set())}) + "\n"
+    )
     try:
         safe_write_text(path, payload, mode=0o600)
     except OSError:
@@ -820,7 +871,8 @@ def get_stack(
     # Pulumi's config API has no batch operation, and if set_config fails
     # mid-loop, the next run will reconcile by repeating this cleanup.
     managed_keys = _read_managed_keys(config)
-    if managed_keys is None:
+    managed_provider_keys = _read_managed_provider_keys(config)
+    if managed_keys is None and managed_provider_keys is None:
         _log.debug(
             "No managed-config sidecar; skipping stale config key cleanup"
             " (expected on the first run after an upgrade or 'tlumi clean')"
@@ -836,28 +888,50 @@ def get_stack(
             )
             existing = {}
 
-        project_prefix = f"{config.name}:"
-        for key in existing:
-            if not key.startswith(project_prefix):
-                continue
-            bare_key = key[len(project_prefix) :]
-            if ":" in bare_key:
-                continue  # nested namespace (e.g. aws:s3:opt when project is "aws")
-            if bare_key not in managed_keys:
-                continue  # not written by tlumi: leave it alone
-            if bare_key in config.variables:
-                continue
-            try:
-                stack.remove_config(bare_key)
-            except auto.errors.CommandError as e:
-                # Symmetric with set_config below: a soft warning here leaves
-                # the stale key silently active across runs (the user would
-                # see a "removed" variable still applying). Raise so the user
-                # can investigate (typically a locked state).
-                raise WorkspaceError(
-                    f"Failed to remove stale config key '{key}': {redact_text(str(e))}",
-                    hint="Check that the Pulumi stack is not locked.",
-                ) from e
+        # Bare project variables: keys under the project's own namespace that
+        # tlumi wrote and are no longer in tlumi.yaml.
+        if managed_keys is not None:
+            project_prefix = f"{config.name}:"
+            for key in existing:
+                if not key.startswith(project_prefix):
+                    continue
+                bare_key = key[len(project_prefix) :]
+                if ":" in bare_key:
+                    continue  # nested namespace (e.g. aws:s3:opt when project is "aws")
+                if bare_key not in managed_keys:
+                    continue  # not written by tlumi: leave it alone
+                if bare_key in config.variables:
+                    continue
+                try:
+                    stack.remove_config(bare_key)
+                except auto.errors.CommandError as e:
+                    # Symmetric with set_config below: a soft warning here leaves
+                    # the stale key silently active across runs (the user would
+                    # see a "removed" variable still applying). Raise so the user
+                    # can investigate (typically a locked state).
+                    raise WorkspaceError(
+                        f"Failed to remove stale config key '{key}': {redact_text(str(e))}",
+                        hint="Check that the Pulumi stack is not locked.",
+                    ) from e
+
+        # Provider-namespaced config (e.g. azure-native:location): full keys
+        # tlumi wrote via provider_config and are no longer in tlumi.yaml. Only
+        # keys tlumi recorded are touched, so a user's hand-set provider config
+        # (never in the sidecar) is left alone.
+        if managed_provider_keys is not None:
+            for key in existing:
+                if key not in managed_provider_keys:
+                    continue
+                if key in config.provider_config:
+                    continue
+                try:
+                    stack.remove_config(key)
+                except auto.errors.CommandError as e:
+                    raise WorkspaceError(
+                        f"Failed to remove stale provider config key '{key}':"
+                        f" {redact_text(str(e))}",
+                        hint="Check that the Pulumi stack is not locked.",
+                    ) from e
 
     for key, value in config.variables.items():
         try:
@@ -868,6 +942,18 @@ def get_stack(
                 hint="Check that the Pulumi stack is not locked.",
             ) from e
 
-    _write_managed_keys(config, set(config.variables))
+    # Provider config keys carry their own namespace, so they are passed to
+    # set_config verbatim (Pulumi routes 'azure-native:location' to that
+    # provider instead of the project namespace used for bare variables).
+    for key, value in config.provider_config.items():
+        try:
+            stack.set_config(key, auto.ConfigValue(value=str(value)))
+        except auto.errors.CommandError as e:
+            raise WorkspaceError(
+                f"Failed to set provider config '{key}': {redact_text(str(e))}",
+                hint="Check that the Pulumi stack is not locked.",
+            ) from e
+
+    _write_managed_keys(config, set(config.variables), set(config.provider_config))
 
     return stack

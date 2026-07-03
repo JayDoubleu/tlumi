@@ -15,6 +15,13 @@ project:
 #   environment: dev
 #   region: us-east-1
 
+# Provider config: namespaced Pulumi settings passed straight to a provider.
+# Many programs need these (a ResourceGroup with no explicit location reads
+# azure-native:location). Keys must be 'namespace:key'.
+# provider_config:
+#   azure-native:location: westeurope
+#   aws:region: eu-west-1
+
 # Secrets configuration
 # Set TLUMI_SECRETS_PASSPHRASE env var to encrypt secrets in state.
 secrets:
