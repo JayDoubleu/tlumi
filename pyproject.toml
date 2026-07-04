@@ -39,7 +39,7 @@ dependencies = [
     "typer>=0.26.8",
     # cli.py imports click directly (feature detection for suggestion handling);
     # 8.0 is typer's own click minimum.
-    "click>=8.0",
+    "click>=8.4.2",
     # rich 13.8.0 is the first release where Console.on_broken_pipe exists and
     # Console._check_buffer intercepts BrokenPipeError; _TlumiConsole's EPIPE
     # handling (display.py) overrides that hook, so earlier rich breaks the
