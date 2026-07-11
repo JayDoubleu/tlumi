@@ -39,13 +39,13 @@ dependencies = [
     "typer>=0.26.8",
     # cli.py imports click directly (feature detection for suggestion handling);
     # 8.0 is typer's own click minimum.
-    "click>=8.0",
+    "click>=8.4.2",
     # rich 13.8.0 is the first release where Console.on_broken_pipe exists and
     # Console._check_buffer intercepts BrokenPipeError; _TlumiConsole's EPIPE
     # handling (display.py) overrides that hook, so earlier rich breaks the
     # exit-code guarantee and fails the broken-pipe tests.
     "rich>=13.8.0",
-    "pulumi>=3.249.0",
+    "pulumi>=3.251.0",
     # pyyaml 6.0/6.0.0 fail to build from source on Python 3.12+ (Cython 3
     # incompatibility); 6.0.1 is the first floor installable everywhere we
     # claim support.
@@ -61,9 +61,9 @@ tlumi = "tlumi.cli:app"
 dev = [
     "pytest>=9.1.1",
     "pytest-mock>=3.14",
-    "mypy>=1.14",
+    "mypy>=2.2.0",
     "types-pyyaml>=6.0",
-    "ruff>=0.15.20",
+    "ruff>=0.15.21",
     "bandit>=1.8.0",
 ]
 
